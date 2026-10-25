@@ -39,7 +39,7 @@ One JSON object per invocation. `{"ok": false, ...}` exits 1 (or 2 for a usage/v
 | `plan-progress` | current and visited nodes, derived from tagged checks |
 | `taught --node n1` | record that a step was taught |
 | `check-record --node n1 --correct [--question ...]` | a tagged check; the node id is required, the wording is kept so practice never repeats it |
-| `graph-add-proposition --text ... --status held --source ...` | one claim |
+| `graph-add-proposition --text ... --status held --source ... [--quote ...]` | one claim; `resource:<id>#chunk=<n>` sources must name an imported resource |
 | `graph-add-chain --conclusion N --premises A,B` | one argument, as a hyperedge |
 | `graph-search --query ...` | keyword search with each hit's premises |
 | `graph-export` / `export` | readable markdown, plus JSON |
@@ -52,6 +52,9 @@ One JSON object per invocation. `{"ok": false, ...}` exits 1 (or 2 for a usage/v
 | `practice-result --session N` | totals and verdicts for one set |
 | `review-due [--limit N]` | review items due now, with the evidence that queued them |
 | `review-record --item N --grade again\|hard\|good\|easy` | grade one retrieval; deterministic SM-2 reschedule, logged in `review_log` |
+| `import-file <path> [--title ...]` | import `.md`/`.txt`/`.pdf` into `resources` + `resource_chunks` (page or byte offsets, sha256 dedupe); PDFs need `pdftotext` |
+| `resource-search --query ...` | keyword search over imported chunks, with page and offsets |
+| `propose-propositions --resource N` | candidate claims as JSON for the agent to review; writes nothing |
 
 Every mutation accepts `--idempotency-key`, so a retried agent tool call replays the stored result
 instead of writing twice.
