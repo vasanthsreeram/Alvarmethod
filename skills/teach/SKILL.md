@@ -27,7 +27,25 @@ Read, in order, before the first question:
 6. `.alvar/LEARNER.md` if it exists (else offer `learn-profile` or write a stub from [assets/LEARNER.md](assets/LEARNER.md) after 3–5 questions)
 7. `.alvar/graph.md` if it exists — read it before probing, skip strands whose propositions are `held`, and say which you skipped.
 
-If `probe`, `learn-visual`, or `learn-verify` are installed, use them for those jobs. If not, follow the same protocols inline.
+If `probe`, `learn-visual`, `learn-verify` or `learn-graph` are installed, use them for those jobs. If not, follow the same protocols inline.
+
+## Runtime
+
+Structured state lives in SQLite through the launcher shipped with this skill. Do not write SQL, and do not keep flags in Markdown: the ledger is the source of truth for progress.
+
+```bash
+scripts/alvar init                                    # first run in a learning folder
+scripts/alvar session-create --goal "master immunology" --kind teach
+scripts/alvar plan-create --file plan.json            # {"nodes":[{id,title,claim,grounds}],"edges":[{from,to}]}
+scripts/alvar plan-validate                           # rejects unknown nodes and cycles
+scripts/alvar plan-progress                           # current + visited, derived from checks
+scripts/alvar taught --node n1
+scripts/alvar check-record --node n1 --correct --reason "said X"
+scripts/alvar session-resume                          # after an interruption
+scripts/alvar graph-search --query "..."              # before probing, via learn-graph
+```
+
+Every command prints one JSON object. `{"ok": false}` is a stop, not a retry-with-the-same-input.
 
 ## Hard rules
 

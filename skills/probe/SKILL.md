@@ -55,6 +55,15 @@ Ids, statuses and the ledger follow [../teach/references/map.md](../teach/refere
 get ids `s1`, `s2`, … here and keep them for the life of the map; the teacher's plan nodes cite them
 under `grounds:`.
 
+Record each reading as you take it, so an interrupted probe loses nothing:
+
+```bash
+scripts/alvar session-create --goal "<goal>" --kind probe
+scripts/alvar probe-record --strand s1 --status known --evidence "Q2, said \"rate of change\""
+```
+
+The Markdown map stays the readable export. The database is what the teacher resumed from.
+
 ```markdown
 # Map — <goal>
 

@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Launcher shipped inside a skill. Resolution order:
+#   1. $ALVAR_RUNTIME            explicit runtime directory
+#   2. <skill>/runtime/          bundled at install time (normal installed case)
+#   3. ../../../runtime/         a repo checkout (skills/<name>/scripts -> repo root)
+#   4. $PWD/.alvar-runtime       per-project pin
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PY="${ALVAR_PYTHON:-python3}"
+
+for candidate in \
+  "${ALVAR_RUNTIME:-}" \
+  "$HERE/../runtime" \
+  "$HERE/../../../runtime" \
+  "$PWD/.alvar-runtime"
+do
+  if [[ -n "$candidate" && -f "$candidate/cli/alvar.py" ]]; then
+    exec "$PY" "$candidate/cli/alvar.py" "$@"
+  fi
+done
+
+echo '{"ok": false, "error": "runtime not found: set ALVAR_RUNTIME to the runtime directory"}' >&2
+exit 2

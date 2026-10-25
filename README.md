@@ -126,6 +126,7 @@ The map is what makes it repeatable: strands, the plan DAG with `s`/`n` ids, a l
 | `learn-profile` | Write `.alvar/LEARNER.md` |
 | `learn-visual` | One SVG, look at it, fix it |
 | `learn-verify` | Fact-check a claim before it is taught as fact |
+| `learn-graph` | Read and write the persistent knowledge graph |
 
 Quizzes **must** use the native picker:
 
@@ -142,10 +143,17 @@ Session files land in the learning folder:
 
 ```text
 .alvar/LEARNER.md
+.alvar/alvar.db            # SQLite: plan, tagged checks, graph, mastery evidence
+.alvar/graph.md            # propositions and reasoning chains, carried across sessions
 .alvar/maps/<topic>.md
 .alvar/sessions/<date>-<topic>.md
 .alvar/visuals/…
 ```
+
+Progress is not a flag in a file. The plan, the tagged checks and the graph live in SQLite through a
+small standard-library runtime, so `/teach` resumes from evidence instead of memory. `./install.sh`
+bundles the runtime into the skills that need it. Details: [docs/runtime.md](docs/runtime.md). Tests:
+`npm test` (11 tests, no network).
 
 Point Obsidian at `.alvar/` if you want LaTeX preview.
 

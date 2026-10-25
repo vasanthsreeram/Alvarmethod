@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Repo-level launcher. Installed skills use their own scripts/alvar, which finds
+# the runtime bundled beside it or the checkout this file belongs to.
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PY="${ALVAR_PYTHON:-python3}"
+exec "$PY" "$ROOT/runtime/cli/alvar.py" "$@"

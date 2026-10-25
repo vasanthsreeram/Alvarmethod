@@ -4,7 +4,9 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 SKILLS_SRC="$ROOT/skills"
-SKILLS=(teach probe learn-visual learn-verify learn-profile)
+SKILLS=(teach probe learn-visual learn-verify learn-profile learn-graph)
+# Skills that ship the runtime so an installed copy works without the repo.
+RUNTIME_SKILLS=(teach learn-graph)
 
 usage() {
   cat <<'EOF'
@@ -108,6 +110,14 @@ while IFS= read -r dest; do
     cp -R "$SKILLS_SRC/$name" "$dest/$name"
     echo "installed $dest/$name"
     copied=$((copied + 1))
+  done
+  for name in "${RUNTIME_SKILLS[@]}"; do
+    if [[ -d "$SKILLS_SRC/$name" ]]; then
+      rm -rf "$dest/$name/runtime"
+      cp -R "$ROOT/runtime" "$dest/$name/runtime"
+      chmod +x "$dest/$name/scripts/alvar" 2>/dev/null || true
+      echo "bundled runtime into $dest/$name"
+    fi
   done
 done < <(targets)
 
