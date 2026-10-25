@@ -208,6 +208,33 @@ class RuntimeTest(unittest.TestCase):
         finally:
             conn.close()
 
+    def test_import_markdown_is_idempotent(self) -> None:
+        self.run_cli("init")
+        maps = self.dir / "maps"
+        maps.mkdir(exist_ok=True)
+        (maps / "synbio.md").write_text(
+            "# Map — solid introduction to synthetic biology\n\n"
+            "Updated: 2026-08-16\nGoal: Know what synbio is as an engineering practice.\n\n"
+            "## Strands\n"
+            "| strand | status | evidence |\n"
+            "|--------|--------|----------|\n"
+            "| what synbio is | edge | Q1 correct, no reason |\n"
+            "| DNA assembly | unknown | Q7 Gibson, I don't know |\n\n"
+            "## Quiz log\n- Q1 [what synbio is] B, correct\n"
+        )
+        first = self.run_cli("import-markdown")
+        self.assertEqual(first["maps"][0]["recorded"], 2)
+        second = self.run_cli("import-markdown")
+        self.assertEqual(second["maps"][0]["recorded"], 0, "second import must not duplicate strands")
+        self.assertEqual(second["maps"][0]["skipped"], 2)
+        conn = sqlite3.connect(self.dir / "alvar.db")
+        try:
+            rows = conn.execute(
+                "SELECT strand_key, outcome FROM session_events WHERE kind='probe' ORDER BY id").fetchall()
+        finally:
+            conn.close()
+        self.assertEqual(rows, [("s1", "edge"), ("s2", "unknown")])
+
     def test_export_and_backup(self) -> None:
         self.run_cli("init")
         self.run_cli("graph-add-proposition", "--text", "exported claim", "--status", "held")

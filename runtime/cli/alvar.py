@@ -592,6 +592,83 @@ def cmd_backup(args) -> dict:
     return {"ok": True, "backup": str(dest), "bytes": dest.stat().st_size}
 
 
+def cmd_import_markdown(args) -> dict:
+    """Read legacy .alvar/maps/*.md strand tables into the database.
+
+    Handles both shapes the skills have shipped: with an id column and without
+    (ids are then assigned s1.. in file order). Re-running records nothing twice.
+    """
+    import re
+    conn = connect(args)
+    maps_dir = Path(args.dir) if args.dir else data_dir(args) / "maps"
+    if not maps_dir.exists():
+        raise AlvarError(f"no maps directory at {maps_dir}")
+    report = []
+    try:
+        for md in sorted(maps_dir.glob("*.md")):
+            text = md.read_text()
+            goal_match = re.search(r"^Goal:\s*(.+)$", text, re.M)
+            heading = re.search(r"^#\s*(?:Map\s*[—-]\s*)?(.+)$", text, re.M)
+            title = (goal_match.group(1) if goal_match else heading.group(1) if heading else md.stem).strip()
+            goal_slug = slugify(title)
+            rows = []
+            for line in text.splitlines():
+                if not line.strip().startswith("|"):
+                    continue
+                cells = [c.strip() for c in line.strip().strip("|").split("|")]
+                if len(cells) < 2:
+                    continue
+                if set("".join(cells)) <= {"-", ":", " "}:
+                    continue
+                if cells[0].lower() in ("strand", "id") or cells[1].lower() == "strand":
+                    continue
+                rows.append(cells)
+            if not rows:
+                report.append({"file": str(md), "goal": title, "recorded": 0, "note": "no strand rows"})
+                continue
+            with conn:
+                lid = learner(conn, args.learner)
+                goal = conn.execute("SELECT id FROM goals WHERE learner_id = ? AND slug = ?",
+                                    (lid, goal_slug)).fetchone()
+                if goal:
+                    goal_id = goal["id"]
+                else:
+                    goal_id = int(conn.execute(
+                        "INSERT INTO goals (learner_id, title, slug, created_at) VALUES (?,?,?,?)",
+                        (lid, title, goal_slug, now())).lastrowid)
+                seen = {r["strand_key"] for r in conn.execute(
+                    "SELECT e.strand_key FROM session_events e JOIN sessions s ON s.id = e.session_id"
+                    " WHERE s.goal_id = ? AND e.kind = 'probe'", (goal_id,))}
+                session_id = int(conn.execute(
+                    "INSERT INTO sessions (goal_id, kind, started_at) VALUES (?,?,?)",
+                    (goal_id, "probe", now())).lastrowid)
+                recorded = skipped = 0
+                for index, cells in enumerate(rows, start=1):
+                    if re.fullmatch(r"s\d+", cells[0]):
+                        strand_key, rest = cells[0], cells[1:]
+                    else:
+                        strand_key, rest = f"s{index}", cells
+                    if len(rest) >= 3 and rest[1] in ("known", "edge", "unknown", "blocked"):
+                        label, status, evidence = rest[0], rest[1], rest[2]
+                    elif len(rest) >= 2 and rest[0] in ("known", "edge", "unknown", "blocked"):
+                        label, status, evidence = "", rest[0], rest[1]
+                    else:
+                        skipped += 1
+                        continue
+                    if strand_key in seen:
+                        skipped += 1
+                        continue
+                    event(conn, session_id, "probe", strand_key=strand_key, outcome=status,
+                          detail=(f"{label}: {evidence}" if label else evidence))
+                    seen.add(strand_key)
+                    recorded += 1
+            report.append({"file": str(md), "goal": title, "goal_id": goal_id,
+                           "recorded": recorded, "skipped": skipped})
+        return {"ok": True, "maps": report}
+    finally:
+        conn.close()
+
+
 def cmd_mastery_record(args) -> dict:
     conn = connect(args)
     try:
@@ -694,6 +771,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = add("export", cmd_export, "write JSON plus markdown exports")
     p.add_argument("--out")
+
+    p = add("import-markdown", cmd_import_markdown, "read legacy .alvar/maps strand tables into the database")
+    p.add_argument("--dir")
+    p.add_argument("--learner", default=DEFAULT_LEARNER)
 
     add("backup", cmd_backup, "consistent copy of the database")
     return parser

@@ -44,6 +44,7 @@ One JSON object per invocation. `{"ok": false, ...}` exits 1 (or 2 for a usage/v
 | `graph-search --query ...` | keyword search with each hit's premises |
 | `graph-export` / `export` | readable markdown, plus JSON |
 | `mastery-record --verdict held\|edge\|gap` | what the learner showed, separate from knowledge |
+| `import-markdown [--dir maps]` | read legacy `.alvar/maps/*.md` strand tables into the database (idempotent) |
 | `backup` | consistent copy through SQLite's backup API |
 
 Every mutation accepts `--idempotency-key`, so a retried agent tool call replays the stored result
@@ -70,13 +71,18 @@ skill so the installed copy works without this repo. The launcher resolves, in o
 ## Tests
 
 ```bash
-python3 tests/test_runtime.py     # 11 tests, ~7 s, no network
+python3 tests/test_runtime.py     # 12 tests, ~7 s, no network
 ```
 
 Covers: idempotent init, doctor, probe recording, plan validation (unknown nodes, dangling edges,
 cycles), position-not-completion, required node ids, hyperedge chains, mastery separation,
-idempotency replay, eight concurrent writers keeping integrity and unique sequence numbers, an
-abrupt process death inside a transaction, export and backup.
+idempotency replay, legacy markdown import (twice, to prove no duplication), eight concurrent
+writers keeping integrity and unique sequence numbers, an abrupt process death inside a
+transaction, export and backup.
+
+The importer handles both map shapes the skills have shipped: the older three-column table (strand,
+status, evidence) with ids assigned in file order, and the newer table with an explicit `s` id
+column. Verified on the real `alvar-learning` map: 9 strands recorded, 9 skipped on the re-run.
 
 ## Not in this release
 
