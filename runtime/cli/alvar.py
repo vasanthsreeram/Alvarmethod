@@ -171,6 +171,12 @@ def learner(conn: sqlite3.Connection, slug: str = DEFAULT_LEARNER) -> int:
     return int(cur.lastrowid)
 
 
+def find_learner(conn: sqlite3.Connection, slug: str = DEFAULT_LEARNER) -> int | None:
+    """Read-only lookup: reading commands must not create a learner row."""
+    row = conn.execute("SELECT id FROM learners WHERE slug = ?", (slug,)).fetchone()
+    return row["id"] if row else None
+
+
 def slugify(text: str) -> str:
     out = [c.lower() if c.isalnum() else "-" for c in text]
     slug = "".join(out)
@@ -755,7 +761,10 @@ def cmd_mastery_record(args) -> dict:
                     " VALUES (?,?,?,?,?,?)",
                     (lid, args.proposition, args.node, args.verdict, args.note, now()),
                 ).lastrowid)
-            return {"ok": True, "mastery_evidence_id": row, "verdict": args.verdict}
+                review = {}
+                if args.verdict == "edge":
+                    review = enqueue_review(conn, lid, args.proposition, "edge", "mastery", row)
+            return {"ok": True, "mastery_evidence_id": row, "verdict": args.verdict, **review}
         return idempotent(conn, args.idempotency_key, "mastery.record", run)
     finally:
         conn.close()
@@ -991,9 +1000,13 @@ def cmd_practice_submit(args) -> dict:
                      now())).lastrowid)
                 event(conn, question["session_id"], "note", outcome="correct" if correct else "incorrect",
                       detail=f"practice q{args.question} attempt {attempt_id}, verdict {verdict}")
+                review = {}
+                if verdict != "held":
+                    review = enqueue_review(conn, question["learner_id"], question["proposition_id"],
+                                            verdict, "practice", evidence_id)
             return {"ok": True, "question_id": args.question, "attempt_id": attempt_id,
                     "correct": correct, "verdict": verdict, "mastery_evidence_id": evidence_id,
-                    "answer_key": question["answer_key"], "rubric": question["rubric"]}
+                    "answer_key": question["answer_key"], "rubric": question["rubric"], **review}
         return idempotent(conn, args.idempotency_key, "practice.submit", run)
     finally:
         conn.close()
@@ -1020,6 +1033,110 @@ def cmd_practice_result(args) -> dict:
             "unanswered": len(items) - len(answered), "verdicts": verdicts,
             "note": "a practice score is evidence from this set of items, not a mastery grade",
         }
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------- review
+
+REVIEW_ALGORITHM = "sm2-v1"
+GRADE_QUALITY = {"again": 0, "hard": 3, "good": 4, "easy": 5}
+
+
+def enqueue_review(conn: sqlite3.Connection, learner_id: int, proposition_id: int | None,
+                   verdict: str, source_kind: str, evidence_id: int) -> dict:
+    """Schedule retrieval for a practice failure or edge evidence.
+
+    New items come due one day out. A new gap on an existing item is a lapse and
+    resets it; anything else leaves an existing schedule alone.
+    """
+    if proposition_id is None:
+        return {}
+    due = (now_dt() + timedelta(days=1)).isoformat()
+    row = conn.execute("SELECT id FROM review_items WHERE learner_id = ? AND proposition_id = ?",
+                       (learner_id, proposition_id)).fetchone()
+    if row:
+        if verdict == "gap":
+            conn.execute(
+                "UPDATE review_items SET interval_days = 1, reps = 0, lapses = lapses + 1, due_at = ?"
+                " WHERE id = ?", (due, row["id"]))
+            return {"review_item_id": row["id"], "review": "reset"}
+        return {"review_item_id": row["id"], "review": "unchanged"}
+    item_id = int(conn.execute(
+        "INSERT INTO review_items (learner_id, proposition_id, due_at, interval_days, ease, source_kind,"
+        " source_id, algorithm, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        (learner_id, proposition_id, due, 1, 2.5, source_kind, evidence_id, REVIEW_ALGORITHM, now())).lastrowid)
+    return {"review_item_id": item_id, "review": "scheduled"}
+
+
+def sm2(reps: int, interval: float, ease: float, grade: str) -> tuple[int, float, float]:
+    """One SM-2 step. Deterministic: same state and grade, same schedule."""
+    q = GRADE_QUALITY[grade]
+    new_ease = max(1.3, round(ease + (0.1 - (5 - q) * (0.08 + (5 - q) * 0.02)), 4))
+    if q < 3:
+        return 0, 1.0, new_ease
+    reps += 1
+    if reps == 1:
+        new_interval = 1.0
+    elif reps == 2:
+        new_interval = 6.0
+    else:
+        new_interval = float(round(interval * ease))
+    return reps, new_interval, new_ease
+
+
+def cmd_review_due(args) -> dict:
+    conn = connect(args, create=False)
+    try:
+        lid = find_learner(conn, args.learner)
+        moment = now()
+        total = conn.execute("SELECT COUNT(*) FROM review_items WHERE learner_id = ? AND due_at <= ?",
+                             (lid, moment)).fetchone()[0]
+        items = [dict(r) for r in conn.execute(
+            "SELECT r.id AS item_id, r.proposition_id, p.text, r.due_at, r.interval_days, r.ease, r.reps,"
+            " r.lapses, r.last_grade, r.source_kind FROM review_items r"
+            " JOIN propositions p ON p.id = r.proposition_id"
+            " WHERE r.learner_id = ? AND r.due_at <= ? ORDER BY r.due_at, r.id LIMIT ?",
+            (lid, moment, args.limit))]
+        for item in items:
+            # What went wrong last time, so the retrieval targets it.
+            last = conn.execute(
+                "SELECT me.verdict, me.note, q.prompt, a.answer FROM mastery_evidence me"
+                " LEFT JOIN attempts a ON a.id = me.attempt_id LEFT JOIN questions q ON q.id = a.question_id"
+                " WHERE me.learner_id = ? AND me.proposition_id = ? AND me.verdict <> 'held'"
+                " ORDER BY me.id DESC LIMIT 1", (lid, item["proposition_id"])).fetchone()
+            item["last_evidence"] = dict(last) if last else None
+        upcoming = conn.execute("SELECT MIN(due_at) FROM review_items WHERE learner_id = ? AND due_at > ?",
+                                (lid, moment)).fetchone()[0]
+        return {"ok": True, "now": moment, "due": total, "items": items, "next_due_at": upcoming,
+                "rule": "a review retrieves what was already taught; it never introduces new material"}
+    finally:
+        conn.close()
+
+
+def cmd_review_record(args) -> dict:
+    conn = connect(args)
+    try:
+        def run():
+            with conn:
+                item = conn.execute("SELECT * FROM review_items WHERE id = ?", (args.item,)).fetchone()
+                if not item:
+                    raise AlvarError(f"no review item {args.item}")
+                reps, interval, ease = sm2(item["reps"], item["interval_days"], item["ease"], args.grade)
+                due = (now_dt() + timedelta(days=interval)).isoformat()
+                conn.execute(
+                    "UPDATE review_items SET reps = ?, interval_days = ?, ease = ?, due_at = ?, last_reviewed = ?,"
+                    " last_grade = ?, lapses = lapses + ?, algorithm = ? WHERE id = ?",
+                    (reps, interval, ease, due, now(), args.grade, int(args.grade == "again"),
+                     REVIEW_ALGORITHM, args.item))
+                conn.execute(
+                    "INSERT INTO review_log (review_item_id, grade, interval_before, interval_after, ease_before,"
+                    " ease_after, due_at, algorithm, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                    (args.item, args.grade, item["interval_days"], interval, item["ease"], ease, due,
+                     REVIEW_ALGORITHM, now()))
+            return {"ok": True, "item_id": args.item, "grade": args.grade, "reps": reps,
+                    "interval_days": interval, "ease": ease, "due_at": due}
+        return idempotent(conn, args.idempotency_key, "review.record", run)
     finally:
         conn.close()
 
@@ -1137,6 +1254,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = add("practice-result", cmd_practice_result, "what one practice set showed")
     p.add_argument("--session", type=int, required=True)
+
+    p = add("review-due", cmd_review_due, "review items due now, oldest first")
+    p.add_argument("--limit", type=int, default=20)
+    p.add_argument("--learner", default=DEFAULT_LEARNER)
+
+    p = add("review-record", cmd_review_record, "grade one retrieval and reschedule it (SM-2)")
+    p.add_argument("--item", type=int, required=True)
+    p.add_argument("--grade", required=True, choices=["again", "hard", "good", "easy"])
     return parser
 
 

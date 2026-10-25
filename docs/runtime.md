@@ -50,6 +50,8 @@ One JSON object per invocation. `{"ok": false, ...}` exits 1 (or 2 for a usage/v
 | `practice-create --goal N --file items.json` | validate and write agent-authored items into a new `practice` session |
 | `practice-submit --question N --answer ... [--reasoning ...] [--confidence 0-1]` | grade one attempt; writes `attempts` + `mastery_evidence`, never a proposition |
 | `practice-result --session N` | totals and verdicts for one set |
+| `review-due [--limit N]` | review items due now, with the evidence that queued them |
+| `review-record --item N --grade again\|hard\|good\|easy` | grade one retrieval; deterministic SM-2 reschedule, logged in `review_log` |
 
 Every mutation accepts `--idempotency-key`, so a retried agent tool call replays the stored result
 instead of writing twice.

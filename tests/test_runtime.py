@@ -32,10 +32,11 @@ class RuntimeTest(unittest.TestCase):
         shutil.rmtree(self.dir, ignore_errors=True)
 
     # -- helpers ---------------------------------------------------------
-    def run_cli(self, *args: str, expect: int = 0) -> dict:
+    def run_cli(self, *args: str, expect: int = 0, at: str | None = None) -> dict:
+        env = {**self.env, "ALVAR_NOW": at} if at else self.env
         proc = subprocess.run(
             ["bash", str(CLI), *args],
-            capture_output=True, text=True, env=self.env, cwd=str(self.dir), check=False,
+            capture_output=True, text=True, env=env, cwd=str(self.dir), check=False,
         )
         self.assertEqual(proc.returncode, expect,
                          f"exit {proc.returncode} for {args}\nstdout: {proc.stdout}\nstderr: {proc.stderr}")
@@ -391,6 +392,61 @@ class RuntimeTest(unittest.TestCase):
         held_wrong = self.run_cli("practice-submit", "--question", str(created["items"][0]["question_id"]),
                                   "--answer", "4", "--verdict", "held", expect=2)
         self.assertIn("held needs a correct answer", held_wrong["error"])
+
+    # -- review --------------------------------------------------------------
+    def test_review_items_come_only_from_failures_and_edge_evidence(self) -> None:
+        f = self.practice_fixture()
+        day0 = "2026-10-25T09:00:00+00:00"
+        created = self.run_cli("practice-create", "--goal", str(f["goal"]), "--file",
+                               self.write_json("items.json", {"items": self.practice_items(f)}), at=day0)
+        q_mcq, _, q_num = (i["question_id"] for i in created["items"])
+        held = self.run_cli("practice-submit", "--question", str(q_mcq), "--answer", "0.25",
+                            "--reasoning", "rise over run", at=day0)
+        self.assertNotIn("review_item_id", held, "a held attempt schedules nothing")
+        wrong = self.run_cli("practice-submit", "--question", str(q_num), "--answer", "9", at=day0)
+        self.assertEqual(wrong["review"], "scheduled")
+        self.run_cli("mastery-record", "--verdict", "gap", "--proposition", str(f["held"]), at=day0)
+        self.assertEqual(self.query("SELECT proposition_id, source_kind FROM review_items"),
+                         [(f["edge"], "practice")],
+                         "only the practice failure is queued; a teach-time gap and held evidence are not")
+        self.run_cli("mastery-record", "--verdict", "edge", "--proposition", str(f["held"]), at=day0)
+        self.assertEqual(self.query("SELECT COUNT(*) FROM review_items")[0][0], 2)
+        self.assertEqual(self.query("SELECT COUNT(*) FROM review_items WHERE proposition_id = ?",
+                                    (f["candidate"],))[0][0], 0, "untouched propositions are never queued")
+
+        now_due = self.run_cli("review-due", at=day0)
+        self.assertEqual(now_due["due"], 0, "new items come due a day later, not in the same sitting")
+        self.assertEqual(now_due["next_due_at"], "2026-10-26T09:00:00+00:00")
+        due = self.run_cli("review-due", at="2026-10-26T09:00:00+00:00")
+        self.assertEqual(due["due"], 2)
+        first = due["items"][0]
+        self.assertEqual(first["proposition_id"], f["edge"])
+        self.assertEqual(first["last_evidence"]["answer"], "9")
+        self.assertIn("never introduces new material", due["rule"])
+
+    def test_review_schedule_is_deterministic_sm2(self) -> None:
+        f = self.practice_fixture()
+        t = "2026-10-25T00:00:00+00:00"
+        item = self.run_cli("mastery-record", "--verdict", "edge", "--proposition", str(f["edge"]),
+                            at=t)["review_item_id"]
+        steps = []
+        for grade, at in [("good", "2026-10-26T00:00:00+00:00"), ("good", "2026-10-27T00:00:00+00:00"),
+                          ("good", "2026-11-02T00:00:00+00:00"), ("hard", "2026-11-17T00:00:00+00:00"),
+                          ("again", "2026-12-25T00:00:00+00:00")]:
+            r = self.run_cli("review-record", "--item", str(item), "--grade", grade, at=at)
+            steps.append((r["reps"], r["interval_days"], r["ease"], r["due_at"]))
+        self.assertEqual(steps, [
+            (1, 1.0, 2.5, "2026-10-27T00:00:00+00:00"),
+            (2, 6.0, 2.5, "2026-11-02T00:00:00+00:00"),
+            (3, 15.0, 2.5, "2026-11-17T00:00:00+00:00"),
+            (4, 38.0, 2.36, "2026-12-25T00:00:00+00:00"),
+            (0, 1.0, 1.56, "2026-12-26T00:00:00+00:00"),
+        ])
+        self.assertEqual(self.query("SELECT lapses, last_grade FROM review_items WHERE id = ?", (item,)),
+                         [(1, "again")])
+        self.assertEqual(self.query("SELECT COUNT(*) FROM review_log")[0][0], 5)
+        missing = self.run_cli("review-record", "--item", "999", "--grade", "good", expect=2)
+        self.assertIn("no review item", missing["error"])
 
 
 if __name__ == "__main__":
