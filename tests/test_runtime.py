@@ -531,6 +531,92 @@ class RuntimeTest(unittest.TestCase):
         self.assertIn("pdftotext not found", result["error"])
         self.assertEqual(self.query("SELECT COUNT(*) FROM resources")[0][0], 0)
 
+    # -- dashboard -----------------------------------------------------------
+    def serve_dashboard(self, *extra: str):
+        proc = subprocess.Popen(["bash", str(CLI), "dashboard", *extra], cwd=str(self.dir), env=self.env,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: proc.poll() is None and proc.kill())
+        line = proc.stdout.readline()
+        self.assertTrue(line, proc.stderr.read() if proc.poll() is not None else "no startup line")
+        return proc, json.loads(line)
+
+    def fetch(self, url: str):
+        import urllib.request
+        with urllib.request.urlopen(url, timeout=10) as resp:
+            return resp.status, dict(resp.headers), resp.read().decode()
+
+    def db_fingerprint(self) -> str:
+        import hashlib
+        # A read-only WAL reader may create an empty -wal/-shm; only content counts.
+        digest = hashlib.sha256()
+        for name in ("alvar.db", "alvar.db-wal"):
+            path = self.dir / name
+            digest.update(path.read_bytes() if path.exists() else b"")
+            digest.update(b"|")
+        return digest.hexdigest()
+
+    def test_dashboard_empty_database_renders_empty_state(self) -> None:
+        out = self.dir / "page.html"
+        rendered = self.run_cli("dashboard", "--out", str(out))
+        self.assertTrue(rendered["ok"])
+        self.assertIn("Nothing recorded yet", out.read_text())
+        self.assertFalse((self.dir / "alvar.db").exists(), "the dashboard never creates a database")
+        self.run_cli("init")
+        proc, started = self.serve_dashboard()
+        status, _, body = self.fetch(started["url"])
+        self.assertEqual(status, 200)
+        self.assertIn("Nothing recorded yet", body)
+        proc.terminate()
+        self.assertEqual(proc.wait(timeout=10), 0)
+
+    def test_dashboard_serves_live_read_only_state(self) -> None:
+        f = self.practice_fixture()
+        self.plan([{"id": "n1", "title": "slope"}, {"id": "n2", "title": "limit"},
+                   {"id": "n3", "title": "derivative <rules>"}],
+                  [{"from": "n1", "to": "n2"}, {"from": "n2", "to": "n3"}])
+        created = self.run_cli("practice-create", "--goal", str(f["goal"]), "--file",
+                               self.write_json("items.json", {"items": self.practice_items(f)}))
+        self.run_cli("practice-submit", "--question", str(created["items"][2]["question_id"]), "--answer", "1")
+        before = self.db_fingerprint()
+        proc, started = self.serve_dashboard()
+        self.assertTrue(started["url"].startswith("http://127.0.0.1:"))
+        self.assertTrue(started["read_only"])
+        status, headers, body = self.fetch(started["url"])
+        self.assertEqual(status, 200)
+        self.assertIn("default-src 'none'", headers["Content-Security-Policy"])
+        self.assertNotIn("<script", body)
+        self.assertNotIn("https://", body, "no CDN, no remote asset")
+        self.assertIn("<svg", body)
+        self.assertRegex(body, r'class="n-current"><title>n2 · limit')
+        self.assertRegex(body, r'class="n-visited"><title>n1 · slope')
+        self.assertIn("derivative &lt;rules&gt;", body, "text is escaped")
+        self.assertRegex(body, r'class="n-upcoming"><title>n3')
+        for heading in ("held", "edge", "candidate"):
+            self.assertIn(f"<h2>{heading} <span class=\"tag t-{heading}\">1</span></h2>", body)
+        self.assertIn("Practice history", body)
+        self.assertIn("<td>1/3</td>", body)
+        self.assertIn("Review due", body)
+        self.assertIn("1 item scheduled", body)
+
+        # Live: the agent writes, a reload shows it.
+        self.run_cli("check-record", "--node", "n3", "--reason", "partial")
+        _, _, reloaded = self.fetch(started["url"])
+        self.assertRegex(reloaded, r'class="n-current"><title>n3')
+        self.assertRegex(reloaded, r'class="n-visited"><title>n2')
+        missing = __import__("urllib.error").error
+        with self.assertRaises(missing.HTTPError):
+            self.fetch(started["url"] + "../alvar.db")
+        proc.terminate()
+        self.assertEqual(proc.wait(timeout=10), 0)
+        self.run_cli("doctor")
+        after_write = self.db_fingerprint()
+        self.assertNotEqual(before, after_write)  # the check-record above
+        proc2, started2 = self.serve_dashboard()
+        self.fetch(started2["url"])
+        proc2.terminate()
+        proc2.wait(timeout=10)
+        self.assertEqual(self.db_fingerprint(), after_write, "serving and reading never writes")
+
 
 def make_pdf(pages: list[list[str]]) -> bytes:
     """A minimal valid PDF, one Helvetica text object per page. No dependencies."""

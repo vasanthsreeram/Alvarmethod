@@ -55,6 +55,7 @@ One JSON object per invocation. `{"ok": false, ...}` exits 1 (or 2 for a usage/v
 | `import-file <path> [--title ...]` | import `.md`/`.txt`/`.pdf` into `resources` + `resource_chunks` (page or byte offsets, sha256 dedupe); PDFs need `pdftotext` |
 | `resource-search --query ...` | keyword search over imported chunks, with page and offsets |
 | `propose-propositions --resource N` | candidate claims as JSON for the agent to review; writes nothing |
+| `dashboard [--goal N] [--port N] [--out file.html]` | read-only HTML view served on `127.0.0.1` (free port by default) until interrupted; `--out` writes the file and exits |
 
 Every mutation accepts `--idempotency-key`, so a retried agent tool call replays the stored result
 instead of writing twice.

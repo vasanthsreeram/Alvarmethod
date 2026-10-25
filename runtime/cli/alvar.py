@@ -284,8 +284,11 @@ def event(conn: sqlite3.Connection, session_id: int, kind: str, *,
 
 def resolve_session(conn: sqlite3.Connection, session_id: int | None) -> sqlite3.Row:
     if session_id is None:
+        # The default is the latest open lesson; practice and review sets are only
+        # ever addressed by id, so they never capture a teach command.
         row = conn.execute(
-            "SELECT * FROM sessions WHERE ended_at IS NULL ORDER BY id DESC LIMIT 1"
+            "SELECT * FROM sessions WHERE ended_at IS NULL AND kind IN ('probe','teach')"
+            " ORDER BY id DESC LIMIT 1"
         ).fetchone()
         if not row:
             raise AlvarError("no open session; run 'alvar session create --goal ...'")
@@ -1317,6 +1320,27 @@ def cmd_resource_search(args) -> dict:
         conn.close()
 
 
+# ---------------------------------------------------------------- dashboard
+
+def cmd_dashboard(args) -> dict | None:
+    """Render the read-only dashboard; serve it on 127.0.0.1 unless --out is given."""
+    import signal
+    import alvar_dashboard as dash
+    path = db_path(args)
+    if args.out:
+        html_text = dash.render(path, args.goal, SCHEMA_VERSION, now())
+        out = Path(args.out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(html_text)
+        return {"ok": True, "out": str(out), "bytes": len(html_text), "read_only": True}
+
+    def stop(*_):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, stop)
+    dash.serve(path, args.goal, SCHEMA_VERSION, now, port=args.port)
+    return None
+
+
 # ---------------------------------------------------------------- parser
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1453,6 +1477,12 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("resource-search", cmd_resource_search, "keyword search over imported chunks, with locations")
     p.add_argument("--query", required=True)
     p.add_argument("--limit", type=int, default=20)
+
+    p = sub.add_parser("dashboard", help="serve a read-only HTML view on 127.0.0.1 until interrupted")
+    p.set_defaults(func=cmd_dashboard)
+    p.add_argument("--goal", type=int, help="goal to open on (default: most recent)")
+    p.add_argument("--port", type=int, default=0, help="default 0 = a free port")
+    p.add_argument("--out", help="write the HTML file and exit instead of serving")
     return parser
 
 
@@ -1467,6 +1497,8 @@ def main(argv: list[str] | None = None) -> int:
     except (sqlite3.Error, json.JSONDecodeError) as exc:
         print(json.dumps({"ok": False, "error": f"{type(exc).__name__}: {exc}"}))
         return 2
+    if result is None:  # a long-running command already printed its own line
+        return 0
     print(json.dumps(result))
     return 0 if result.get("ok") else 1
 

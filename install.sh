@@ -4,9 +4,9 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 SKILLS_SRC="$ROOT/skills"
-SKILLS=(teach probe learn-visual learn-verify learn-profile learn-graph learn-practice learn-review learn-import)
+SKILLS=(teach probe learn-visual learn-verify learn-profile learn-graph learn-practice learn-review learn-import learn-dashboard)
 # Skills that ship the runtime so an installed copy works without the repo.
-RUNTIME_SKILLS=(teach learn-graph learn-practice learn-review learn-import)
+RUNTIME_SKILLS=(teach learn-graph learn-practice learn-review learn-import learn-dashboard)
 
 usage() {
   cat <<'EOF'
