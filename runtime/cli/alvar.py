@@ -25,16 +25,61 @@ from pathlib import Path
 
 RUNTIME_ROOT = Path(__file__).resolve().parent.parent
 MIGRATIONS = RUNTIME_ROOT / "db" / "migrations"
-SCHEMA_VERSION = 1
+# The newest migration file is the version this runtime expects.
+SCHEMA_VERSION = max(int(f.name.split("_", 1)[0]) for f in MIGRATIONS.glob("*.sql"))
 DEFAULT_LEARNER = "default"
 
 
 class AlvarError(Exception):
-    """A user-facing, non-crashing failure."""
+    """A user-facing, non-crashing failure. Extra keyword fields land in the JSON."""
+
+    def __init__(self, message: str, **fields) -> None:
+        super().__init__(message)
+        self.fields = fields
+
+
+def now_dt() -> datetime:
+    # $ALVAR_NOW pins the clock, so scheduling is reproducible in tests and replays.
+    pinned = os.environ.get("ALVAR_NOW")
+    if pinned:
+        moment = datetime.fromisoformat(pinned)
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=timezone.utc)
+        return moment.astimezone(timezone.utc).replace(microsecond=0)
+    return datetime.now(timezone.utc).replace(microsecond=0)
 
 
 def now() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    return now_dt().isoformat()
+
+
+class Connection(sqlite3.Connection):
+    """`with conn:` takes the write lock up front (BEGIN IMMEDIATE).
+
+    A deferred transaction reads, then upgrades to a writer; under concurrent
+    writers that upgrade can fail, and read-then-insert steps (next event seq,
+    learner row, goal row) can race. Taking the lock first closes both.
+    """
+
+    def __enter__(self):
+        if not self.in_transaction:
+            self.execute("BEGIN IMMEDIATE")
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if exc_type is None:
+            self.commit()
+        else:
+            self.rollback()
+        return False
+
+
+def open_db(path: Path) -> Connection:
+    conn = sqlite3.connect(path, factory=Connection, isolation_level=None, timeout=30)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 30000")
+    return conn
 
 
 def data_dir(args) -> Path:
@@ -52,16 +97,32 @@ def connect(args, create: bool = True) -> sqlite3.Connection:
         if not create:
             raise AlvarError(f"no database at {path}; run 'alvar init' first")
         migrate(args)
-    conn = sqlite3.connect(path)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
+    conn = open_db(path)
     conn.execute("PRAGMA journal_mode = WAL")
-    conn.execute("PRAGMA busy_timeout = 5000")
     version = conn.execute("SELECT MAX(version) AS v FROM schema_migrations").fetchone()["v"]
-    if version != SCHEMA_VERSION:
+    if version is not None and version > SCHEMA_VERSION:
         conn.close()
-        raise AlvarError(f"database schema is v{version}, runtime expects v{SCHEMA_VERSION}; run 'alvar doctor'")
+        raise AlvarError(f"database schema is v{version}, newer than this runtime (v{SCHEMA_VERSION});"
+                         " update the skill before using this data directory")
+    if version != SCHEMA_VERSION:
+        # Older database: migrations are additive, so bring it forward in place.
+        conn.close()
+        migrate(args)
+        conn = open_db(path)
     return conn
+
+
+def split_sql(script: str) -> list[str]:
+    statements, buf = [], ""
+    for line in script.splitlines(keepends=True):
+        buf += line
+        if sqlite3.complete_statement(buf):
+            if buf.strip():
+                statements.append(buf.strip())
+            buf = ""
+    if buf.strip() and not all(l.strip().startswith("--") or not l.strip() for l in buf.splitlines()):
+        statements.append(buf.strip())
+    return statements
 
 
 def migrate(args) -> dict:
@@ -69,27 +130,31 @@ def migrate(args) -> dict:
     for sub in ("maps", "sessions", "resources", "visuals", "exports", "backups"):
         (directory / sub).mkdir(parents=True, exist_ok=True)
     path = directory / "alvar.db"
-    conn = sqlite3.connect(path)
+    conn = open_db(path)
     try:
-        conn.execute("PRAGMA foreign_keys = ON")
         conn.execute("PRAGMA journal_mode = WAL")
         conn.execute(
             "CREATE TABLE IF NOT EXISTS schema_migrations ("
             " version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)"
         )
-        applied = {r[0] for r in conn.execute("SELECT version FROM schema_migrations")}
         ran = []
+        # Each migration and its schema_migrations row commit together, under the
+        # write lock, so two processes opening an old database cannot both apply it.
         for sql_file in sorted(MIGRATIONS.glob("*.sql")):
             version = int(sql_file.name.split("_", 1)[0])
-            if version in applied:
-                continue
-            conn.executescript(sql_file.read_text())
-            conn.execute(
-                "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?,?,?)",
-                (version, sql_file.name, now()),
-            )
+            with conn:
+                if conn.execute("SELECT 1 FROM schema_migrations WHERE version = ?",
+                                (version,)).fetchone():
+                    continue
+                for statement in split_sql(sql_file.read_text()):
+                    if statement.upper().startswith("PRAGMA"):
+                        continue
+                    conn.execute(statement)
+                conn.execute(
+                    "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?,?,?)",
+                    (version, sql_file.name, now()),
+                )
             ran.append(sql_file.name)
-        conn.commit()
         return {"ok": True, "db": str(path), "applied": ran, "schema_version": SCHEMA_VERSION}
     finally:
         conn.close()
@@ -409,6 +474,9 @@ def cmd_check_record(args) -> dict:
         def run():
             with conn:
                 session = resolve_session(conn, args.session)
+                if session["kind"] in ("practice", "review"):
+                    raise AlvarError(f"session {session['id']} is a {session['kind']} session;"
+                                     " practice and review never move plan position")
                 if not args.node:
                     raise AlvarError("a check must carry the node id it is about")
                 known = conn.execute(
@@ -416,6 +484,13 @@ def cmd_check_record(args) -> dict:
                     (session["goal_id"], args.node)).fetchone()
                 if not known:
                     raise AlvarError(f"node {args.node} is not on this goal's plan")
+                if args.question:
+                    # Keep the wording the learner saw, so practice can avoid repeating it.
+                    conn.execute(
+                        "INSERT INTO questions (session_id, node_key, prompt, answer_key, created_at)"
+                        " VALUES (?,?,?,?,?)",
+                        (session["id"], args.node, args.question, "", now()),
+                    )
                 event(conn, session["id"], "check", node_key=args.node,
                       outcome="correct" if args.correct else "incorrect", detail=args.reason)
             return {"ok": True, "session_id": session["id"], "node": args.node,
@@ -686,6 +761,269 @@ def cmd_mastery_record(args) -> dict:
         conn.close()
 
 
+# ---------------------------------------------------------------- practice
+
+ITEM_TYPES = ("mcq", "exact", "numeric", "open")
+VERDICT_RANK = {"gap": 0, "edge": 1, "held": 2}
+
+
+def normalize(text: str | None) -> str:
+    return " ".join((text or "").casefold().split()).strip(" .?!")
+
+
+def resolve_goal(conn: sqlite3.Connection, goal_id: int) -> sqlite3.Row:
+    row = conn.execute("SELECT * FROM goals WHERE id = ?", (goal_id,)).fetchone()
+    if not row:
+        raise AlvarError(f"no goal {goal_id}")
+    return row
+
+
+def seen_prompts(conn: sqlite3.Connection, learner_id: int) -> list[str]:
+    """Every question wording this learner has already been shown, any session kind."""
+    return [r["prompt"] for r in conn.execute(
+        "SELECT DISTINCT q.prompt FROM questions q"
+        " JOIN sessions s ON s.id = q.session_id JOIN goals g ON g.id = s.goal_id"
+        " WHERE g.learner_id = ? AND q.prompt NOT IN ('', '(unstated)') ORDER BY q.id",
+        (learner_id,))]
+
+
+def practice_targets(conn: sqlite3.Connection, learner_id: int, goal_id: int, count: int) -> list[dict]:
+    """Held and edge propositions, weakest evidence first, goal-linked first.
+
+    A proposition is linked to the goal when mastery evidence names one of the
+    goal's plan nodes, or an earlier question on this goal exercised it.
+    """
+    rows = [dict(r) for r in conn.execute(
+        "SELECT id, text, status, source_ref FROM propositions"
+        " WHERE (learner_id = ? OR learner_id IS NULL) AND status IN ('held','edge') ORDER BY id",
+        (learner_id,))]
+    linked = {r["pid"] for r in conn.execute(
+        "SELECT me.proposition_id AS pid FROM mastery_evidence me"
+        " JOIN plan_nodes n ON n.node_key = me.node_key AND n.goal_id = ?"
+        " WHERE me.learner_id = ? AND me.proposition_id IS NOT NULL"
+        " UNION SELECT q.proposition_id FROM questions q JOIN sessions s ON s.id = q.session_id"
+        " WHERE s.goal_id = ? AND q.proposition_id IS NOT NULL",
+        (goal_id, learner_id, goal_id))}
+    for row in rows:
+        latest = conn.execute(
+            "SELECT verdict FROM mastery_evidence WHERE learner_id = ? AND proposition_id = ?"
+            " ORDER BY id DESC LIMIT 1", (learner_id, row["id"])).fetchone()
+        row["latest_verdict"] = latest["verdict"] if latest else None
+        row["practiced"] = conn.execute(
+            "SELECT COUNT(*) FROM questions q JOIN sessions s ON s.id = q.session_id"
+            " WHERE s.kind = 'practice' AND q.proposition_id = ?", (row["id"],)).fetchone()[0]
+        row["goal_linked"] = row["id"] in linked
+    # Weakest first: a gap, then edge, then never assessed, then held.
+    weakness = {"gap": 0, "edge": 1, None: 2, "held": 3}
+    rows.sort(key=lambda r: (not r["goal_linked"], weakness[r["latest_verdict"]], r["practiced"], r["id"]))
+    return rows[:count]
+
+
+def validate_item(item: dict, index: int, allowed: dict[int, dict], avoid: set[str]) -> list[str]:
+    where = f"item {index}"
+    problems = []
+    pid = item.get("proposition_id")
+    prompt = (item.get("prompt") or "").strip()
+    key = item.get("answer_key")
+    item_type = item.get("item_type") or ("mcq" if item.get("options") else "open")
+    if pid not in allowed:
+        problems.append(f"{where}: proposition {pid} is not a held or edge proposition for this learner")
+    if not prompt:
+        problems.append(f"{where}: prompt is empty")
+    if key is None or str(key).strip() == "":
+        problems.append(f"{where}: answer_key must be written before the learner sees the item")
+    if item_type not in ITEM_TYPES:
+        problems.append(f"{where}: item_type must be one of {', '.join(ITEM_TYPES)}")
+    if not (item.get("rubric") or "").strip():
+        problems.append(f"{where}: rubric is empty; say what a sound answer must show")
+    if prompt and normalize(prompt) in avoid:
+        problems.append(f"{where}: prompt repeats wording the learner has already seen; vary the problem")
+    if prompt and pid in allowed and normalize(allowed[pid]["text"]) in normalize(prompt):
+        problems.append(f"{where}: prompt restates proposition {pid} verbatim; vary the problem, not the fact")
+    if item_type == "mcq":
+        options = item.get("options") or []
+        if len(options) < 2:
+            problems.append(f"{where}: an mcq needs at least two options")
+        elif key not in options:
+            problems.append(f"{where}: an mcq answer_key must be one of its options, verbatim")
+    if item_type == "numeric":
+        try:
+            float(key)
+            float(item.get("tolerance") or 0)
+        except (TypeError, ValueError):
+            problems.append(f"{where}: numeric answer_key and tolerance must be numbers")
+    if item.get("distance") not in (None, "familiar", "adjacent", "unfamiliar"):
+        problems.append(f"{where}: distance must be familiar, adjacent or unfamiliar")
+    return problems
+
+
+def cmd_practice_create(args) -> dict:
+    conn = connect(args)
+    try:
+        goal = resolve_goal(conn, args.goal)
+        lid = goal["learner_id"]
+        targets = practice_targets(conn, lid, goal["id"], args.count)
+        avoid = seen_prompts(conn, lid)
+        if not args.file:
+            # Draft mode: what to write items about, and what not to repeat. Writes nothing.
+            return {
+                "ok": True, "draft": True, "goal_id": goal["id"], "count": args.count,
+                "targets": targets, "avoid": avoid,
+                "item_shape": {"items": [{
+                    "proposition_id": "a target id", "prompt": "a new problem, not the lesson's check",
+                    "item_type": "mcq|exact|numeric|open", "options": ["for mcq only"],
+                    "answer_key": "written now, immutable", "rubric": "what a sound answer shows",
+                    "tolerance": "numeric only", "distance": "familiar|adjacent|unfamiliar"}]},
+                "next": "write the items, then run practice-create --goal N --file items.json",
+            }
+        payload = json.loads(Path(args.file).read_text()) if args.file != "-" else json.load(sys.stdin)
+        items = payload.get("items") if isinstance(payload, dict) else payload
+        if not items:
+            raise AlvarError("no items in the practice file")
+        if len(items) > args.count:
+            raise AlvarError(f"{len(items)} items exceeds --count {args.count}")
+        allowed = {r["id"]: dict(r) for r in conn.execute(
+            "SELECT id, text, status FROM propositions"
+            " WHERE (learner_id = ? OR learner_id IS NULL) AND status IN ('held','edge')", (lid,))}
+        avoid_set = {normalize(p) for p in avoid}
+        problems: list[str] = []
+        for index, item in enumerate(items, start=1):
+            problems += validate_item(item, index, allowed, avoid_set)
+            avoid_set.add(normalize(item.get("prompt")))
+        if problems:
+            raise AlvarError("practice items rejected", problems=problems)
+
+        def run():
+            with conn:
+                session_id = int(conn.execute(
+                    "INSERT INTO sessions (goal_id, kind, started_at, model) VALUES (?,?,?,?)",
+                    (goal["id"], "practice", now(), args.model)).lastrowid)
+                created = []
+                for item in items:
+                    item_type = item.get("item_type") or ("mcq" if item.get("options") else "open")
+                    qid = int(conn.execute(
+                        "INSERT INTO questions (session_id, proposition_id, prompt, options, answer_key,"
+                        " item_type, rubric, tolerance, distance, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                        (session_id, item["proposition_id"], item["prompt"].strip(),
+                         json.dumps(item["options"]) if item.get("options") else None,
+                         str(item["answer_key"]), item_type, item["rubric"],
+                         float(item["tolerance"]) if item.get("tolerance") not in (None, "") else None,
+                         item.get("distance"), now())).lastrowid)
+                    created.append({"question_id": qid, "proposition_id": item["proposition_id"],
+                                    "item_type": item_type, "prompt": item["prompt"].strip(),
+                                    "options": item.get("options")})
+                event(conn, session_id, "note", detail=f"practice set: {len(created)} items")
+            return {"ok": True, "session_id": session_id, "goal_id": goal["id"], "kind": "practice",
+                    "items": created}
+        return idempotent(conn, args.idempotency_key, "practice.create", run)
+    finally:
+        conn.close()
+
+
+def auto_grade(question: sqlite3.Row, answer: str) -> bool | None:
+    """Grade what can be graded mechanically against the immutable key; None for open items."""
+    item_type = question["item_type"]
+    key = question["answer_key"]
+    if item_type == "mcq":
+        options = json.loads(question["options"] or "[]")
+        given = answer.strip()
+        if len(given) == 1 and given.isalpha() and ord(given.upper()) - 65 < len(options):
+            given = options[ord(given.upper()) - 65]
+        return normalize(given) == normalize(key)
+    if item_type == "exact":
+        return normalize(answer) == normalize(key)
+    if item_type == "numeric":
+        try:
+            return abs(float(answer) - float(key)) <= (question["tolerance"] or 0)
+        except ValueError:
+            return False
+    return None
+
+
+def cmd_practice_submit(args) -> dict:
+    conn = connect(args)
+    try:
+        def run():
+            with conn:
+                question = conn.execute(
+                    "SELECT q.*, s.kind AS session_kind, g.learner_id FROM questions q"
+                    " JOIN sessions s ON s.id = q.session_id JOIN goals g ON g.id = s.goal_id"
+                    " WHERE q.id = ?", (args.question,)).fetchone()
+                if not question:
+                    raise AlvarError(f"no question {args.question}")
+                if question["session_kind"] != "practice":
+                    raise AlvarError(f"question {args.question} is not a practice item")
+                if conn.execute("SELECT 1 FROM attempts WHERE question_id = ?", (args.question,)).fetchone():
+                    raise AlvarError(f"question {args.question} already has an attempt;"
+                                     " write a new item instead of re-asking this one")
+                if args.confidence is not None and not 0 <= args.confidence <= 1:
+                    raise AlvarError("confidence is a number from 0 to 1")
+                judged = True if args.correct else False if args.incorrect else None
+                graded = auto_grade(question, args.answer)
+                if graded is None:
+                    if judged is None:
+                        raise AlvarError("open item: grade it against the rubric and pass --correct or --incorrect",
+                                         rubric=question["rubric"])
+                    correct = judged
+                else:
+                    if judged is not None and judged != graded:
+                        raise AlvarError("the judgment disagrees with the immutable answer key",
+                                         key_says="correct" if graded else "incorrect")
+                    correct = graded
+                reasoned = bool((args.reasoning or "").strip())
+                derived = "held" if correct and reasoned else "edge" if correct else "gap"
+                verdict = args.verdict or derived
+                if verdict == "held" and derived != "held":
+                    raise AlvarError("held needs a correct answer with sound reasoning;"
+                                     f" this attempt supports at most {derived}")
+                raw = json.dumps({"answer": args.answer, "reasoning": args.reasoning,
+                                  "confidence": args.confidence})
+                attempt_id = int(conn.execute(
+                    "INSERT INTO attempts (question_id, learner_id, answer, reasoning, confidence, correct,"
+                    " raw, feedback, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                    (args.question, question["learner_id"], args.answer, args.reasoning, args.confidence,
+                     int(correct), raw, args.feedback, now())).lastrowid)
+                evidence_id = int(conn.execute(
+                    "INSERT INTO mastery_evidence (learner_id, proposition_id, attempt_id, verdict, note,"
+                    " created_at) VALUES (?,?,?,?,?,?)",
+                    (question["learner_id"], question["proposition_id"], attempt_id, verdict,
+                     f"practice q{args.question}" + (f": {args.feedback}" if args.feedback else ""),
+                     now())).lastrowid)
+                event(conn, question["session_id"], "note", outcome="correct" if correct else "incorrect",
+                      detail=f"practice q{args.question} attempt {attempt_id}, verdict {verdict}")
+            return {"ok": True, "question_id": args.question, "attempt_id": attempt_id,
+                    "correct": correct, "verdict": verdict, "mastery_evidence_id": evidence_id,
+                    "answer_key": question["answer_key"], "rubric": question["rubric"]}
+        return idempotent(conn, args.idempotency_key, "practice.submit", run)
+    finally:
+        conn.close()
+
+
+def cmd_practice_result(args) -> dict:
+    conn = connect(args, create=False)
+    try:
+        session = resolve_session(conn, args.session)
+        if session["kind"] != "practice":
+            raise AlvarError(f"session {session['id']} is a {session['kind']} session, not practice")
+        items = [dict(r) for r in conn.execute(
+            "SELECT q.id AS question_id, q.proposition_id, q.item_type, q.prompt,"
+            " a.answer, a.correct, a.confidence, me.verdict"
+            " FROM questions q LEFT JOIN attempts a ON a.question_id = q.id"
+            " LEFT JOIN mastery_evidence me ON me.attempt_id = a.id"
+            " WHERE q.session_id = ? ORDER BY q.id", (session["id"],))]
+        answered = [i for i in items if i["correct"] is not None]
+        verdicts = {v: sum(1 for i in answered if i["verdict"] == v) for v in ("held", "edge", "gap")}
+        return {
+            "ok": True, "session_id": session["id"], "goal_id": session["goal_id"],
+            "items": items, "total": len(items), "answered": len(answered),
+            "correct": sum(1 for i in answered if i["correct"]),
+            "unanswered": len(items) - len(answered), "verdicts": verdicts,
+            "note": "a practice score is evidence from this set of items, not a mastery grade",
+        }
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------------------- parser
 
 def build_parser() -> argparse.ArgumentParser:
@@ -738,6 +1076,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--node", required=True)
     p.add_argument("--correct", action="store_true")
     p.add_argument("--reason")
+    p.add_argument("--question", help="the check's wording, kept so practice never repeats it")
 
     p = add("taught", cmd_taught, "record that a node was taught")
     p.add_argument("--session", type=int)
@@ -777,6 +1116,27 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--learner", default=DEFAULT_LEARNER)
 
     add("backup", cmd_backup, "consistent copy of the database")
+
+    p = add("practice-create", cmd_practice_create,
+            "draft targets for a practice set, or write agent-authored items with --file")
+    p.add_argument("--goal", type=int, required=True)
+    p.add_argument("--count", type=int, default=5)
+    p.add_argument("--file", help="items JSON, or - for stdin; omit to get targets and wordings to avoid")
+    p.add_argument("--model")
+
+    p = add("practice-submit", cmd_practice_submit, "grade one practice attempt")
+    p.add_argument("--question", type=int, required=True)
+    p.add_argument("--answer", required=True)
+    p.add_argument("--reasoning")
+    p.add_argument("--confidence", type=float, help="0 to 1, as the learner stated it")
+    grade = p.add_mutually_exclusive_group()
+    grade.add_argument("--correct", action="store_true", help="your judgment on an open item")
+    grade.add_argument("--incorrect", action="store_true", help="your judgment on an open item")
+    p.add_argument("--verdict", choices=["held", "edge", "gap"], help="override the derived verdict")
+    p.add_argument("--feedback")
+
+    p = add("practice-result", cmd_practice_result, "what one practice set showed")
+    p.add_argument("--session", type=int, required=True)
     return parser
 
 
@@ -786,7 +1146,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         result = args.func(args)
     except AlvarError as exc:
-        print(json.dumps({"ok": False, "error": str(exc)}))
+        print(json.dumps({"ok": False, "error": str(exc), **exc.fields}))
         return 2
     except (sqlite3.Error, json.JSONDecodeError) as exc:
         print(json.dumps({"ok": False, "error": f"{type(exc).__name__}: {exc}"}))

@@ -38,7 +38,7 @@ One JSON object per invocation. `{"ok": false, ...}` exits 1 (or 2 for a usage/v
 | `plan-validate` | unknown nodes, dangling edges, cycles |
 | `plan-progress` | current and visited nodes, derived from tagged checks |
 | `taught --node n1` | record that a step was taught |
-| `check-record --node n1 --correct` | a tagged check; the node id is required |
+| `check-record --node n1 --correct [--question ...]` | a tagged check; the node id is required, the wording is kept so practice never repeats it |
 | `graph-add-proposition --text ... --status held --source ...` | one claim |
 | `graph-add-chain --conclusion N --premises A,B` | one argument, as a hyperedge |
 | `graph-search --query ...` | keyword search with each hit's premises |
@@ -46,6 +46,10 @@ One JSON object per invocation. `{"ok": false, ...}` exits 1 (or 2 for a usage/v
 | `mastery-record --verdict held\|edge\|gap` | what the learner showed, separate from knowledge |
 | `import-markdown [--dir maps]` | read legacy `.alvar/maps/*.md` strand tables into the database (idempotent) |
 | `backup` | consistent copy through SQLite's backup API |
+| `practice-create --goal N [--count N]` | draft: held/edge targets plus every wording the learner has seen; writes nothing |
+| `practice-create --goal N --file items.json` | validate and write agent-authored items into a new `practice` session |
+| `practice-submit --question N --answer ... [--reasoning ...] [--confidence 0-1]` | grade one attempt; writes `attempts` + `mastery_evidence`, never a proposition |
+| `practice-result --session N` | totals and verdicts for one set |
 
 Every mutation accepts `--idempotency-key`, so a retried agent tool call replays the stored result
 instead of writing twice.

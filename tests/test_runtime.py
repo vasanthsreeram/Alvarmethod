@@ -19,6 +19,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 CLI = ROOT / "bin" / "alvar"
 PY = sys.executable
+MIGRATIONS = ROOT / "runtime" / "db" / "migrations"
+LATEST = max(int(f.name.split("_", 1)[0]) for f in MIGRATIONS.glob("*.sql"))
 
 
 class RuntimeTest(unittest.TestCase):
@@ -39,6 +41,51 @@ class RuntimeTest(unittest.TestCase):
                          f"exit {proc.returncode} for {args}\nstdout: {proc.stdout}\nstderr: {proc.stderr}")
         return json.loads(proc.stdout) if proc.stdout.strip() else {}
 
+    def write_json(self, name: str, payload) -> str:
+        path = self.dir / name
+        path.write_text(json.dumps(payload))
+        return str(path)
+
+    def query(self, sql: str, params=()) -> list:
+        conn = sqlite3.connect(self.dir / "alvar.db")
+        try:
+            return conn.execute(sql, params).fetchall()
+        finally:
+            conn.close()
+
+    def practice_fixture(self) -> dict:
+        """A taught goal: plan, two checks, a held and an edge proposition, one candidate."""
+        self.run_cli("init")
+        session = self.run_cli("session-create", "--goal", "derivatives")
+        self.plan([{"id": "n1", "title": "slope"}, {"id": "n2", "title": "limit"}],
+                  [{"from": "n1", "to": "n2"}])
+        self.run_cli("check-record", "--node", "n1", "--correct", "--reason", "sound",
+                     "--question", "What is the slope of y = 3x + 1?")
+        self.run_cli("check-record", "--node", "n2", "--correct", "--reason", "sound")
+        held = self.run_cli("graph-add-proposition", "--text", "the slope of a line is rise over run",
+                            "--status", "held", "--source", "sessions/d.md#n1")["proposition_id"]
+        edge = self.run_cli("graph-add-proposition", "--text", "a derivative is a limit of slopes",
+                            "--status", "edge", "--source", "sessions/d.md#n2")["proposition_id"]
+        cand = self.run_cli("graph-add-proposition", "--text", "every function has a derivative",
+                            "--status", "candidate")["proposition_id"]
+        return {"goal": session["goal_id"], "teach_session": session["session_id"],
+                "held": held, "edge": edge, "candidate": cand}
+
+    def practice_items(self, f: dict) -> list:
+        return [
+            {"proposition_id": f["held"], "item_type": "mcq",
+             "prompt": "A ramp climbs 2 m over 8 m of floor. What is its slope?",
+             "options": ["4", "0.25", "16"], "answer_key": "0.25",
+             "rubric": "divides rise by run", "distance": "adjacent"},
+            {"proposition_id": f["edge"], "item_type": "open",
+             "prompt": "Why does shrinking the gap between two points on a curve give the tangent slope?",
+             "answer_key": "the secant slopes approach one value as the gap goes to zero",
+             "rubric": "names secant slopes and the limit as the gap shrinks"},
+            {"proposition_id": f["edge"], "item_type": "numeric",
+             "prompt": "Estimate the slope of y = x^2 at x = 3 using h = 0.001.",
+             "answer_key": "6.001", "tolerance": 0.01, "rubric": "computes ((3+h)^2 - 9)/h"},
+        ]
+
     def plan(self, nodes, edges, expect: int = 0) -> dict:
         path = self.dir / "plan.json"
         path.write_text(json.dumps({"nodes": nodes, "edges": edges}))
@@ -53,9 +100,9 @@ class RuntimeTest(unittest.TestCase):
         doctor = self.run_cli("doctor")
         self.assertTrue(doctor["ok"], doctor)
         self.assertEqual(doctor["checks"]["integrity"], "ok")
-        self.assertEqual(doctor["checks"]["schema_version"], 1)
+        self.assertEqual(doctor["checks"]["schema_version"], LATEST)
         self.assertEqual(doctor["checks"]["journal_mode"], "wal")
-        self.assertEqual(first["schema_version"], 1)
+        self.assertEqual(first["schema_version"], LATEST)
 
     def test_session_and_probe_are_recorded(self) -> None:
         self.run_cli("init")
@@ -249,6 +296,101 @@ class RuntimeTest(unittest.TestCase):
             self.assertEqual(conn.execute("PRAGMA integrity_check").fetchone()[0], "ok")
         finally:
             conn.close()
+
+    # -- practice ----------------------------------------------------------
+    def test_practice_draft_targets_held_and_edge_and_writes_nothing(self) -> None:
+        f = self.practice_fixture()
+        self.run_cli("mastery-record", "--verdict", "held", "--proposition", str(f["held"]), "--node", "n1")
+        self.run_cli("mastery-record", "--verdict", "edge", "--proposition", str(f["edge"]), "--node", "n2")
+        before = self.query("SELECT COUNT(*) FROM sessions")[0][0]
+        draft = self.run_cli("practice-create", "--goal", str(f["goal"]), "--count", "5")
+        self.assertTrue(draft["draft"])
+        self.assertEqual({t["id"] for t in draft["targets"]}, {f["held"], f["edge"]},
+                         "candidates are never practice targets")
+        self.assertEqual(draft["targets"][0]["id"], f["edge"],
+                         "weakest evidence first: edge before held")
+        self.assertIn("What is the slope of y = 3x + 1?", draft["avoid"])
+        self.assertEqual(self.query("SELECT COUNT(*) FROM sessions")[0][0], before, "a draft writes nothing")
+
+    def test_practice_rejects_repeats_restatements_and_candidates(self) -> None:
+        f = self.practice_fixture()
+        items = [
+            {"proposition_id": f["held"], "prompt": "what is the slope of y = 3x + 1",
+             "answer_key": "3", "item_type": "exact", "rubric": "reads the coefficient"},
+            {"proposition_id": f["edge"], "prompt": "True or false: a derivative is a limit of slopes.",
+             "answer_key": "true", "item_type": "exact", "rubric": "x"},
+            {"proposition_id": f["candidate"], "prompt": "Does |x| have a derivative at 0?",
+             "answer_key": "no", "item_type": "exact", "rubric": "corner"},
+            {"proposition_id": f["held"], "prompt": "Pick one", "options": ["a", "b"],
+             "answer_key": "c", "rubric": "r"},
+        ]
+        bad = self.run_cli("practice-create", "--goal", str(f["goal"]),
+                           "--file", self.write_json("bad.json", {"items": items}), expect=2)
+        joined = " | ".join(bad["problems"])
+        self.assertIn("item 1: prompt repeats wording", joined)
+        self.assertIn("item 2: prompt restates proposition", joined)
+        self.assertIn("item 3: proposition", joined)
+        self.assertIn("item 4: an mcq answer_key must be one of its options", joined)
+        self.assertEqual(self.query("SELECT COUNT(*) FROM sessions WHERE kind='practice'")[0][0], 0)
+
+    def test_practice_grades_into_attempts_and_evidence_never_propositions(self) -> None:
+        f = self.practice_fixture()
+        created = self.run_cli("practice-create", "--goal", str(f["goal"]), "--file",
+                               self.write_json("items.json", {"items": self.practice_items(f)}))
+        self.assertEqual(created["kind"], "practice")
+        q_mcq, q_open, q_num = (i["question_id"] for i in created["items"])
+        props_before = self.query("SELECT id, text, status FROM propositions ORDER BY id")
+        progress_before = self.run_cli("plan-progress", "--goal", str(f["goal"]))
+
+        mcq = self.run_cli("practice-submit", "--question", str(q_mcq), "--answer", "B",
+                           "--reasoning", "2 divided by 8", "--confidence", "0.8")
+        self.assertTrue(mcq["correct"])
+        self.assertEqual(mcq["verdict"], "held")
+
+        needs_judgment = self.run_cli("practice-submit", "--question", str(q_open),
+                                      "--answer", "it gets closer", expect=2)
+        self.assertIn("pass --correct or --incorrect", needs_judgment["error"])
+        open_item = self.run_cli("practice-submit", "--question", str(q_open),
+                                 "--answer", "it gets closer", "--correct")
+        self.assertEqual(open_item["verdict"], "edge", "correct without reasoning is edge, not held")
+
+        disagree = self.run_cli("practice-submit", "--question", str(q_num), "--answer", "5",
+                                "--correct", expect=2)
+        self.assertIn("immutable answer key", disagree["error"])
+        wrong = self.run_cli("practice-submit", "--question", str(q_num), "--answer", "5",
+                             "--reasoning", "guessed", "--confidence", "0.9")
+        self.assertFalse(wrong["correct"])
+        self.assertEqual(wrong["verdict"], "gap")
+        again = self.run_cli("practice-submit", "--question", str(q_num), "--answer", "6.001", expect=2)
+        self.assertIn("already has an attempt", again["error"])
+
+        attempts = self.query("SELECT answer, reasoning, confidence, correct FROM attempts ORDER BY id")
+        self.assertEqual(attempts, [("B", "2 divided by 8", 0.8, 1), ("it gets closer", None, None, 1),
+                                    ("5", "guessed", 0.9, 0)])
+        evidence = self.query("SELECT proposition_id, verdict FROM mastery_evidence ORDER BY id")
+        self.assertEqual(evidence, [(f["held"], "held"), (f["edge"], "edge"), (f["edge"], "gap")])
+        self.assertEqual(self.query("SELECT id, text, status FROM propositions ORDER BY id"), props_before,
+                         "grading never writes or changes a proposition")
+        progress_after = self.run_cli("plan-progress", "--goal", str(f["goal"]))
+        self.assertEqual((progress_after["current"], progress_after["visited"]),
+                         (progress_before["current"], progress_before["visited"]),
+                         "practice must not move plan position")
+
+        result = self.run_cli("practice-result", "--session", str(created["session_id"]))
+        self.assertEqual((result["total"], result["answered"], result["correct"]), (3, 3, 2))
+        self.assertEqual(result["verdicts"], {"held": 1, "edge": 1, "gap": 1})
+        self.assertIn("not a mastery grade", result["note"])
+
+    def test_practice_session_refuses_checks(self) -> None:
+        f = self.practice_fixture()
+        created = self.run_cli("practice-create", "--goal", str(f["goal"]), "--file",
+                               self.write_json("items.json", {"items": self.practice_items(f)[:1]}))
+        refused = self.run_cli("check-record", "--session", str(created["session_id"]),
+                               "--node", "n1", "--correct", expect=2)
+        self.assertIn("never move plan position", refused["error"])
+        held_wrong = self.run_cli("practice-submit", "--question", str(created["items"][0]["question_id"]),
+                                  "--answer", "4", "--verdict", "held", expect=2)
+        self.assertIn("held needs a correct answer", held_wrong["error"])
 
 
 if __name__ == "__main__":
