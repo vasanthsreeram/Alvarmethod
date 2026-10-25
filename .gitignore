@@ -8,3 +8,5 @@
 .emdash.env
 *.pem
 node_modules/
+__pycache__/
+*.pyc

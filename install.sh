@@ -115,6 +115,7 @@ while IFS= read -r dest; do
     if [[ -d "$SKILLS_SRC/$name" ]]; then
       rm -rf "$dest/$name/runtime"
       cp -R "$ROOT/runtime" "$dest/$name/runtime"
+      find "$dest/$name/runtime" -name __pycache__ -type d -prune -exec rm -rf {} +
       chmod +x "$dest/$name/scripts/alvar" 2>/dev/null || true
       echo "bundled runtime into $dest/$name"
     fi

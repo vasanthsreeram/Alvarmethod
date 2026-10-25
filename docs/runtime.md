@@ -30,7 +30,7 @@ One JSON object per invocation. `{"ok": false, ...}` exits 1 (or 2 for a usage/v
 | command | job |
 |---|---|
 | `init` | create data dir, apply migrations, create the learner row (idempotent) |
-| `doctor` | schema version, integrity check, pragmas, table count |
+| `doctor` | data-dir permissions, schema version (migrates an older database), integrity, WAL, backup age; each failure carries its exact `remedy` |
 | `session-create --goal ... --kind teach\|probe` | open a session against a goal |
 | `session-resume [--id N]` | events plus derived progress, for picking work back up |
 | `probe-record --strand s1 --status known\|edge\|unknown\|blocked` | one strand reading, recorded as taken |
@@ -72,16 +72,65 @@ finish one on its own.
 proposition being `held` does not mean the learner holds it. A wrong guess never becomes a
 proposition.
 
+## Practice, review, import, dashboard
+
+**Practice** (`learn-practice`) runs in its own `practice` session. `practice-create` without `--file`
+is a draft: held and edge propositions to target, plus every wording the learner has already seen.
+The agent writes the items (answer key and rubric first) and `practice-create --file` validates them:
+no repeated wording, no prompt that restates the proposition, no `candidate` targets, mcq keys must be
+an option. `practice-submit` grades `mcq`/`exact`/`numeric` items against the key and takes the
+agent's judgment for `open` ones; it writes `attempts` and `mastery_evidence` (correct and reasoned:
+held; correct, no reasoning: edge; incorrect: gap) and never a proposition. `check-record` refuses
+to run in a practice or review session, and commands that default to "the latest open session" only
+consider teach and probe sessions.
+
+**Review** (`learn-review`) queues one item per proposition, only from a practice gap or edge and
+from `mastery-record --verdict edge`. New items come due a day later. `review-record` applies SM-2
+(again, hard, good, easy map to quality 0, 3, 4, 5; intervals 1, 6, then interval x ease; ease floor
+1.3) and logs the grade in `review_log`. `$ALVAR_NOW` pins the clock, so a schedule is reproducible.
+
+**Import** (`learn-import`) stores `.md`/`.txt`/`.pdf` as `resources` (sha256, a copy under
+`resources/`) and `resource_chunks` (about 1.5 KB each, with `page` for PDFs and
+`start_offset`/`end_offset` in bytes). PDF text comes from `pdftotext` when it is installed; without
+it the command refuses with `"missing_tool": "pdftotext"`. There is no OCR and no `.docx`.
+`propose-propositions` prints candidate sentences with a `resource:<id>#chunk=<n>[&page=<p>]`
+locator and writes nothing.
+
+**Dashboard** (`learn-dashboard`) opens the database read-only (`mode=ro`) and serves one HTML page on
+`127.0.0.1` (port 0 = a free port) until interrupted, re-rendering on every request. Inline CSS, a
+hand-drawn SVG DAG, no JavaScript, no CDN, and a `Content-Security-Policy: default-src 'none'`
+header. An absent or empty database renders an empty-state page; an older-schema database renders a
+page asking for `alvar doctor`.
+
+## Schema versions
+
+Migrations in `runtime/db/migrations/` are additive and numbered; the runtime expects the newest.
+Opening an older database (any command except `dashboard`) applies the missing migrations in place,
+each in one transaction under the write lock, so two processes cannot both apply one. A database
+newer than the runtime is refused with a message to update the skills.
+
+| version | adds |
+|---|---|
+| 1 | the 18 base tables |
+| 2 | practice item columns on `questions` (proposition, type, rubric, tolerance, distance), `attempts.feedback` |
+| 3 | SM-2 state on `review_items`, `review_log` |
+| 4 | resource size, pages, stored copy; chunk byte offsets |
+
 ## Install
 
-`./install.sh` copies each skill, and for `teach` and `learn-graph` also bundles `runtime/` inside the
-skill so the installed copy works without this repo. The launcher resolves, in order:
-`$ALVAR_RUNTIME`, `<skill>/runtime/`, `../../../runtime/` (repo checkout), `$PWD/.alvar-runtime`.
+`./install.sh` copies each skill, and for every skill that ships `scripts/alvar` (`teach`,
+`learn-graph`, `learn-practice`, `learn-review`, `learn-import`, `learn-dashboard`) also bundles
+`runtime/` inside the skill so the installed copy works without this repo. The launcher resolves, in
+order: `$ALVAR_RUNTIME`, `<skill>/runtime/`, `../../../runtime/` (repo checkout),
+`$PWD/.alvar-runtime`.
+
+Installing through a tool that copies `skills/` only (for example `npx skills add ...`) does not
+bundle the runtime; set `ALVAR_RUNTIME` to a checkout's `runtime/` directory in that case.
 
 ## Tests
 
 ```bash
-python3 tests/test_runtime.py     # 12 tests, ~7 s, no network
+python3 tests/test_runtime.py     # 28 tests, ~20 s, no network
 ```
 
 Covers: idempotent init, doctor, probe recording, plan validation (unknown nodes, dangling edges,
@@ -90,13 +139,21 @@ idempotency replay, legacy markdown import (twice, to prove no duplication), eig
 writers keeping integrity and unique sequence numbers, an abrupt process death inside a
 transaction, export and backup.
 
+Since the practice to release phases: practice drafting, item rejection, grading into attempts and
+evidence with propositions and plan position untouched, practice sessions refusing checks; review
+queueing only from failures and edge evidence, a deterministic five-step SM-2 schedule; text import
+byte offsets and dedupe, PDF pages (skipped if `pdftotext` is absent), the missing-tool refusal,
+unsupported types; the dashboard's empty state and its live, read-only, script-free page; a v1
+database migrated and still readable, a newer database refused, doctor's permission and backup-age
+remedies; and the installed layout running from its bundled runtime with no repo.
+
 The importer handles both map shapes the skills have shipped: the older three-column table (strand,
 status, evidence) with ids assigned in file order, and the newer table with an explicit `s` id
 column. Verified on the real `alvar-learning` map: 9 strands recorded, 9 skipped on the re-run.
 
 ## Not in this release
 
-Practice generation and grading (`learn-practice`), spaced repetition scheduling (`learn-review`),
-document ingestion (`learn-import`), the browser dashboard (`learn-dashboard`), and voice
-(`learn-voice`). The schema already carries `questions`, `attempts`, `review_items`, `resources`,
-`resource_chunks` and `jobs` so those phases can land without a migration of existing data.
+Voice (`learn-voice`), OCR and `.docx`/image import, FSRS scheduling, graph merge and duplicate
+detection, a zoomable graph view, and data deletion. Tested on Linux with Python 3.11; the
+per-harness skill discovery (Pi, Claude Code, Codex, OpenCode) has not been re-tested for the new
+skills.

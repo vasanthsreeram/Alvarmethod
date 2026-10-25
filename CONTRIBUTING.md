@@ -68,7 +68,8 @@ If you only changed Claude paths, still skim `quiz-ui.md` so Grok/Codex/OpenCode
 
 1. Folder `skills/<name>/` with `name` matching the directory: `^[a-z0-9]+(-[a-z0-9]+)*$`
 2. `SKILL.md` with YAML frontmatter + a body an agent can execute
-3. Add `<name>` to the `SKILLS=(...)` array in `install.sh`
+3. Add `<name>` to the `SKILLS=(...)` array in `install.sh`; if it ships `scripts/alvar`, also to
+   `RUNTIME_SKILLS=(...)` so the installed copy gets the runtime (a test checks both)
 4. One line in the README skills table
 5. Do not duplicate `philosophy.md` / `process.md` — link them
 

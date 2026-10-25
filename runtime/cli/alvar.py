@@ -214,29 +214,128 @@ def cmd_init(args) -> dict:
         conn.close()
 
 
+BACKUP_MAX_AGE_DAYS = 7
+
+
 def cmd_doctor(args) -> dict:
-    checks: dict[str, object] = {"python": sys.version.split()[0], "runtime_root": str(RUNTIME_ROOT)}
+    """Check the data directory, schema, integrity, WAL and backups.
+
+    Every failure or warning names the exact command that fixes it. Warnings do
+    not fail the run; failures do.
+    """
+    directory = data_dir(args)
     path = db_path(args)
+    flag = f" --data {directory}" if getattr(args, "data", None) else ""
+    checks: dict[str, object] = {"python": sys.version.split()[0], "runtime_root": str(RUNTIME_ROOT),
+                                 "data_dir": str(directory)}
+    results: list[dict] = []
+
+    def record(name: str, status: str, detail: str, remedy: str | None = None) -> None:
+        entry = {"check": name, "status": status, "detail": detail}
+        if remedy:
+            entry["remedy"] = remedy
+        results.append(entry)
+
+    def finish() -> dict:
+        failed = [r for r in results if r["status"] == "fail"]
+        return {"ok": not failed, "checks": checks, "results": results,
+                "remedies": [r["remedy"] for r in results if r.get("remedy")]}
+
+    # Data directory: present, usable by us, not writable by everyone.
+    if not directory.exists():
+        record("data_dir", "fail", f"{directory} does not exist", f"alvar{flag} init")
+        return finish()
+    if not os.access(directory, os.R_OK | os.W_OK | os.X_OK):
+        record("data_dir", "fail", f"{directory} is not readable and writable by this user",
+               f"chmod u+rwx {directory}")
+        return finish()
+    mode = directory.stat().st_mode & 0o777
+    checks["data_dir_mode"] = oct(mode)
+    if mode & 0o002:
+        record("data_dir", "warn", f"{directory} is writable by every user ({oct(mode)})",
+               f"chmod o-w {directory}")
+    else:
+        record("data_dir", "pass", f"{directory} ({oct(mode)})")
+
     if not path.exists():
-        return {"ok": False, "error": f"no database at {path}", "checks": checks,
-                "hint": "run 'alvar init'"}
-    conn = connect(args, create=False)
+        record("database", "fail", f"no database at {path}", f"alvar{flag} init")
+        return finish()
+    if not os.access(path, os.R_OK | os.W_OK):
+        record("database", "fail", f"{path} is not readable and writable by this user", f"chmod u+rw {path}")
+        return finish()
+
+    # Schema: read the version before opening, because opening migrates forward.
+    raw = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     try:
-        integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]
+        before = raw.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
+    except sqlite3.Error as exc:
+        before = None
+        record("schema", "fail", f"cannot read schema_migrations: {exc}",
+               f"restore a backup: cp {newest_backup(directory) or '<backup>'} {path}")
+        return finish()
+    finally:
+        raw.close()
+    try:
+        conn = connect(args, create=False)
+    except AlvarError as exc:
+        record("schema", "fail", str(exc),
+               "update the skills to the newest release (npx alvarmethod, or ./install.sh from a fresh checkout)")
+        checks["schema_version"] = before
+        return finish()
+    try:
         version = conn.execute("SELECT MAX(version) AS v FROM schema_migrations").fetchone()["v"]
+        integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]
+        journal = conn.execute("PRAGMA journal_mode").fetchone()[0]
         tables = [r["name"] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")]
         checks.update({
             "db": str(path),
             "schema_version": version,
             "integrity": integrity,
-            "journal_mode": conn.execute("PRAGMA journal_mode").fetchone()[0],
+            "journal_mode": journal,
             "foreign_keys": conn.execute("PRAGMA foreign_keys").fetchone()[0],
             "tables": len(tables),
+            "migrations": [dict(r) for r in conn.execute(
+                "SELECT version, name, applied_at FROM schema_migrations ORDER BY version")],
         })
-        return {"ok": integrity == "ok" and version == SCHEMA_VERSION, "checks": checks}
     finally:
         conn.close()
+    if before != version:
+        checks["migrated_from"] = before
+        record("schema", "pass", f"migrated v{before} -> v{version}")
+    else:
+        record("schema", "pass", f"v{version}")
+    if integrity == "ok":
+        record("integrity", "pass", "ok")
+    else:
+        backup = newest_backup(directory)
+        record("integrity", "fail", integrity,
+               f"cp {path} {path}.damaged && cp {backup} {path}" if backup
+               else f"alvar{flag} export   # salvage what is readable, then re-init")
+    if journal == "wal":
+        record("wal", "pass", "journal_mode=wal")
+    else:
+        record("wal", "fail", f"journal_mode={journal}; WAL could not be enabled (network or read-only filesystem?)",
+               "move the data directory to a local disk and point ALVAR_DATA_DIR (or --data) at it")
+
+    backup = newest_backup(directory)
+    if not backup:
+        record("backup", "warn", "no backup yet", f"alvar{flag} backup")
+    else:
+        taken = datetime.fromtimestamp(backup.stat().st_mtime, timezone.utc)
+        # now_dt() drops sub-second precision; a backup taken this second must not read as negative.
+        age = max(0.0, (now_dt() - taken).total_seconds() / 86400)
+        checks["backup_age_days"] = round(age, 1)
+        if age > BACKUP_MAX_AGE_DAYS:
+            record("backup", "warn", f"newest backup is {age:.0f} days old ({backup.name})", f"alvar{flag} backup")
+        else:
+            record("backup", "pass", f"{backup.name}, {age:.1f} days old")
+    return finish()
+
+
+def newest_backup(directory: Path) -> Path | None:
+    found = sorted((directory / "backups").glob("alvar-*.db"), key=lambda f: f.stat().st_mtime)
+    return found[-1] if found else None
 
 
 def cmd_session_create(args) -> dict:

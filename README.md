@@ -127,6 +127,10 @@ The map is what makes it repeatable: strands, the plan DAG with `s`/`n` ids, a l
 | `learn-visual` | One SVG, look at it, fix it |
 | `learn-verify` | Fact-check a claim before it is taught as fact |
 | `learn-graph` | Read and write the persistent knowledge graph |
+| `learn-practice` | New problems on taught ideas, graded against keys written in advance |
+| `learn-review` | Spaced retrieval of practice failures and edge evidence (SM-2) |
+| `learn-import` | Import `.md` / `.txt` / `.pdf` as citable, chunked resources |
+| `learn-dashboard` | Read-only local browser view of the plan, graph, practice and reviews |
 
 Quizzes **must** use the native picker:
 
@@ -147,13 +151,16 @@ Session files land in the learning folder:
 .alvar/graph.md            # propositions and reasoning chains, carried across sessions
 .alvar/maps/<topic>.md
 .alvar/sessions/<date>-<topic>.md
+.alvar/resources/…         # copies of imported documents
 .alvar/visuals/…
+.alvar/backups/alvar-<timestamp>.db
 ```
 
 Progress is not a flag in a file. The plan, the tagged checks and the graph live in SQLite through a
 small standard-library runtime, so `/teach` resumes from evidence instead of memory. `./install.sh`
-bundles the runtime into the skills that need it. Details: [docs/runtime.md](docs/runtime.md). Tests:
-`npm test` (11 tests, no network).
+bundles the runtime into the skills that need it. Practice, review, import and the dashboard read and
+write the same database; `alvar doctor` checks it and prints the fix for anything wrong. Details:
+[docs/runtime.md](docs/runtime.md). Tests: `npm test` (28 tests, no network).
 
 Point Obsidian at `.alvar/` if you want LaTeX preview.
 

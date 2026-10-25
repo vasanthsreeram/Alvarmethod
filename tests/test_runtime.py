@@ -617,6 +617,130 @@ class RuntimeTest(unittest.TestCase):
         proc2.wait(timeout=10)
         self.assertEqual(self.db_fingerprint(), after_write, "serving and reading never writes")
 
+    # -- reliability -----------------------------------------------------------
+    def make_v1_database(self) -> None:
+        """A database exactly as the first runtime release left it: migration 1 only."""
+        conn = sqlite3.connect(self.dir / "alvar.db")
+        try:
+            conn.executescript((MIGRATIONS / "0001_init.sql").read_text())
+            conn.execute("PRAGMA journal_mode = WAL")
+            conn.executescript(
+                "INSERT INTO schema_migrations VALUES (1, '0001_init.sql', '2026-10-01T00:00:00+00:00');"
+                "INSERT INTO learners (id, slug, display, profile_ref, created_at)"
+                " VALUES (1, 'default', 'Default', 'LEARNER.md', '2026-10-01');"
+                "INSERT INTO goals (id, learner_id, title, slug, created_at)"
+                " VALUES (1, 1, 'chain rule', 'chain-rule', '2026-10-01');"
+                "INSERT INTO sessions (id, goal_id, kind, started_at) VALUES (1, 1, 'teach', '2026-10-01');"
+                "INSERT INTO plan_nodes (goal_id, node_key, title, created_at) VALUES (1, 'n1', 'a', '2026-10-01');"
+                "INSERT INTO session_events (session_id, seq, kind, node_key, outcome, created_at)"
+                " VALUES (1, 1, 'check', 'n1', 'correct', '2026-10-01');"
+                "INSERT INTO propositions (learner_id, text, status, source_ref, created_at)"
+                " VALUES (1, 'the chain rule composes derivatives', 'held', 'sessions/c.md#n1', '2026-10-01');"
+                "INSERT INTO review_items (learner_id, proposition_id, due_at) VALUES (1, 1, '2026-10-02');"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_v1_database_stays_readable_and_reports_its_version(self) -> None:
+        self.make_v1_database()
+        page = self.dir / "page.html"
+        self.run_cli("dashboard", "--out", str(page))
+        self.assertIn("schema v1", page.read_text(), "the read-only dashboard reports, never migrates")
+        self.assertEqual(self.query("SELECT MAX(version) FROM schema_migrations")[0][0], 1)
+
+        doctor = self.run_cli("doctor")
+        self.assertTrue(doctor["ok"], doctor)
+        self.assertEqual(doctor["checks"]["migrated_from"], 1)
+        self.assertEqual(doctor["checks"]["schema_version"], LATEST)
+        self.assertEqual([m["version"] for m in doctor["checks"]["migrations"]], list(range(1, LATEST + 1)))
+        self.assertEqual(self.query("PRAGMA integrity_check")[0][0], "ok")
+
+        found = self.run_cli("graph-search", "--query", "chain rule")
+        self.assertEqual(found["propositions"][0]["status"], "held")
+        progress = self.run_cli("plan-progress", "--goal", "1")
+        self.assertEqual((progress["current"], progress["visited"]), ("n1", ["n1"]))
+        due = self.run_cli("review-due", at="2026-10-03T00:00:00+00:00")
+        self.assertEqual(due["due"], 1, "a v1 review row is still scheduled after migration")
+        again = self.run_cli("doctor")
+        self.assertNotIn("migrated_from", again["checks"], "migration runs once")
+
+    def test_newer_database_is_refused_with_a_remedy(self) -> None:
+        self.run_cli("init")
+        conn = sqlite3.connect(self.dir / "alvar.db")
+        conn.execute("INSERT INTO schema_migrations VALUES (99, '0099_future.sql', 'later')")
+        conn.commit()
+        conn.close()
+        doctor = self.run_cli("doctor", expect=1)
+        self.assertFalse(doctor["ok"])
+        failed = [r for r in doctor["results"] if r["status"] == "fail"]
+        self.assertEqual(failed[0]["check"], "schema")
+        self.assertIn("newer than this runtime", failed[0]["detail"])
+        self.assertIn("update the skills", failed[0]["remedy"])
+        refused = self.run_cli("graph-search", "--query", "x", expect=2)
+        self.assertIn("newer than this runtime", refused["error"])
+
+    def test_doctor_checks_permissions_and_backup_age_with_remedies(self) -> None:
+        missing = self.run_cli("doctor", expect=1)
+        self.assertIn("alvar init", missing["remedies"][0])
+        self.run_cli("init")
+        fresh = self.run_cli("doctor")
+        self.assertTrue(fresh["ok"])
+        backup = {r["check"]: r for r in fresh["results"]}["backup"]
+        self.assertEqual((backup["status"], backup["remedy"]), ("warn", "alvar backup"))
+        self.assertEqual({r["check"]: r["status"] for r in fresh["results"]}["wal"], "pass")
+
+        self.run_cli("backup")
+        recent = {r["check"]: r["status"] for r in self.run_cli("doctor")["results"]}
+        self.assertEqual(recent["backup"], "pass")
+        from datetime import datetime, timedelta, timezone
+        later = (datetime.now(timezone.utc) + timedelta(days=10)).replace(microsecond=0).isoformat()
+        stale = {r["check"]: r for r in self.run_cli("doctor", at=later)["results"]}["backup"]
+        self.assertEqual(stale["status"], "warn")
+        self.assertIn("days old", stale["detail"])
+        self.assertEqual(stale["remedy"], "alvar backup")
+
+        os.chmod(self.dir, 0o777)
+        try:
+            loose = {r["check"]: r for r in self.run_cli("doctor")["results"]}["data_dir"]
+            self.assertEqual(loose["status"], "warn")
+            self.assertEqual(loose["remedy"], f"chmod o-w {self.dir}")
+            if os.geteuid() != 0:  # root ignores permission bits
+                os.chmod(self.dir, 0o500)
+                locked = self.run_cli("doctor", expect=1)
+                self.assertEqual(locked["results"][0]["remedy"], f"chmod u+rwx {self.dir}")
+        finally:
+            os.chmod(self.dir, 0o700)
+
+    def test_installed_layout_runs_without_the_repo(self) -> None:
+        install_sh = (ROOT / "install.sh").read_text()
+        skills = set(install_sh.split("\nSKILLS=(", 1)[1].split(")", 1)[0].split())
+        runtime = set(install_sh.split("\nRUNTIME_SKILLS=(", 1)[1].split(")", 1)[0].split())
+        on_disk = {d.name for d in (ROOT / "skills").iterdir() if (d / "SKILL.md").exists()}
+        with_launcher = {d.name for d in (ROOT / "skills").iterdir() if (d / "scripts" / "alvar").exists()}
+        self.assertEqual(skills, on_disk, "every skill directory is installed")
+        self.assertEqual(runtime, with_launcher, "every skill with a launcher gets the runtime bundled")
+
+        project = self.dir / "project"
+        project.mkdir()
+        env = {k: v for k, v in self.env.items() if k not in ("ALVAR_RUNTIME", "ALVAR_DATA_DIR")}
+        env["PATH"] = "/usr/bin:/bin"
+        proc = subprocess.run(["bash", str(ROOT / "install.sh"), "--project", "--claude"],
+                              cwd=str(project), env=env, capture_output=True, text=True, check=False)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        installed = project / ".claude" / "skills"
+        for name in sorted(runtime):
+            run = subprocess.run(["bash", str(installed / name / "scripts" / "alvar"), "doctor"],
+                                 cwd=str(project), env=env, capture_output=True, text=True, check=False)
+            result = json.loads(run.stdout)
+            self.assertEqual(Path(result["checks"]["runtime_root"]), installed / name / "runtime",
+                             f"{name} must use its bundled runtime, not the repo")
+        launcher = installed / "learn-practice" / "scripts" / "alvar"
+        init = json.loads(subprocess.run(["bash", str(launcher), "init"], cwd=str(project), env=env,
+                                         capture_output=True, text=True, check=True).stdout)
+        self.assertEqual((project / init["db"]).resolve(), (project / ".alvar" / "alvar.db").resolve())
+        self.assertEqual(init["schema_version"], LATEST)
+
 
 def make_pdf(pages: list[list[str]]) -> bytes:
     """A minimal valid PDF, one Helvetica text object per page. No dependencies."""

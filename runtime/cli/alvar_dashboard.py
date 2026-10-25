@@ -300,7 +300,13 @@ def resources_section(conn) -> str:
 
 def serve(db: Path, goal_id: int | None, expected_version: int, now_fn, port: int = 0) -> None:
     class Handler(BaseHTTPRequestHandler):
+        def do_HEAD(self):  # noqa: N802 (http.server API)
+            self.respond(head=True)
+
         def do_GET(self):  # noqa: N802 (http.server API)
+            self.respond(head=False)
+
+        def respond(self, head: bool):
             url = urlparse(self.path)
             if url.path not in ("/", "/index.html"):
                 self.send_error(404)
@@ -321,7 +327,8 @@ def serve(db: Path, goal_id: int | None, expected_version: int, now_fn, port: in
                              "default-src 'none'; style-src 'unsafe-inline'; img-src data:")
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
-            self.wfile.write(body)
+            if not head:
+                self.wfile.write(body)
 
         def log_message(self, *args):  # keep stdout to the one JSON line
             pass

@@ -12,7 +12,8 @@
     "install.sh",
     "templates",
     "source",
-    "docs/runtime.md"
+    "docs/runtime.md",
+    "!**/__pycache__"
   ],
   "repository": {
     "type": "git",

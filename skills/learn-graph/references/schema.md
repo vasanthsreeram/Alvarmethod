@@ -1,7 +1,8 @@
 # Graph schema
 
 The database is one SQLite file in the learner data directory: `.alvar/alvar.db`. Authoritative SQL
-is `runtime/db/migrations/0001_init.sql`. This page says what each table means and which commands
+is `runtime/db/migrations/` (`0001_init.sql` plus additive migrations for practice, review and
+import, applied in order; an older database is migrated forward the first time it is opened). This page says what each table means and which commands
 write it.
 
 ## Two kinds of record, kept apart on purpose
@@ -10,8 +11,8 @@ write it.
 |---|---|---|
 | `propositions` | objective domain knowledge | `graph-add-proposition` |
 | `reasoning_chains`, `chain_premises` | arguments, as hyperedges | `graph-add-chain` |
-| `mastery_evidence` | observations about this learner | `mastery-record` |
-| `attempts` | the raw answer, reasoning, confidence, result | recorded during a session |
+| `mastery_evidence` | observations about this learner | `mastery-record`, `practice-submit` |
+| `attempts` | the raw answer, reasoning, confidence, result | `practice-submit` |
 
 A proposition can be `held` while the learner has no mastery evidence for it, and a learner can have
 `gap` evidence against a proposition that is still `held` in the field. Those are different facts and

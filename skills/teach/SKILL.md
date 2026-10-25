@@ -27,7 +27,7 @@ Read, in order, before the first question:
 6. `.alvar/LEARNER.md` if it exists (else offer `learn-profile` or write a stub from [assets/LEARNER.md](assets/LEARNER.md) after 3–5 questions)
 7. `.alvar/graph.md` if it exists — read it before probing, skip strands whose propositions are `held`, and say which you skipped.
 
-If `probe`, `learn-visual`, `learn-verify` or `learn-graph` are installed, use them for those jobs. If not, follow the same protocols inline.
+If `probe`, `learn-visual`, `learn-verify` or `learn-graph` are installed, use them for those jobs. If not, follow the same protocols inline. `learn-practice`, `learn-review`, `learn-import` and `learn-dashboard` are optional: practice after a goal, reviews due before a new lesson, citable source documents, and a read-only browser view.
 
 ## Runtime
 
@@ -62,7 +62,7 @@ Every command prints one JSON object. `{"ok": false}` is a stop, not a retry-wit
 ## Turn 0
 
 1. Restate the goal in one sentence. Confirm.
-2. Load or create learner files, and read `.alvar/graph.md` if it exists.
+2. Load or create learner files, and read `.alvar/graph.md` if it exists. If `scripts/alvar review-due` reports items due, offer the review first (`learn-review`); never fold review into new teaching.
 3. Probe (or reuse a map for this exact goal if it is fresh and the user agrees).
 4. Plan: assign strand ids `s1…` to what the probe read, node ids `n1…` to the steps, edges only prerequisite → dependent. Write the DAG into the map file before showing it.
 5. Plan + mermaid. Pause.
@@ -80,4 +80,4 @@ Answer the question. Do not "just finish the slide." Resume the same node unless
 
 ## Done for now
 
-Write the ledger, what locked, what is still `edge`, and the next node. Then append to `.alvar/graph.md` every proposition this session established, with its chain, its `source:` session and node id, and its status. Leave the session file in a state another agent can resume.
+Write the ledger, what locked, what is still `edge`, and the next node. Then append to `.alvar/graph.md` every proposition this session established, with its chain, its `source:` session and node id, and its status. Leave the session file in a state another agent can resume. If a goal's plan has been taught through, offer a short independent practice set (`learn-practice`); do not call it mastery.
