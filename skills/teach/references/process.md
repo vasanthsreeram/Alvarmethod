@@ -25,10 +25,12 @@ Reason how to teach **this mind** **this goal**. Do not wing it.
 
 - Build a dependency DAG. Each node is one reasoning step, not a chapter.
 - Start from `known`. Path through `edge`. Do not start in `unknown` with no ramp.
+- Give every strand an id (`s1`, `s2`, …) and every node an id (`n1`, `n2`, …). Ids are assigned once and never renumbered; a new prerequisite takes the next free number.
+- Each node states its `grounds:` (the strand ids it rests on) and its `edges:`. An edge runs prerequisite → dependent, and nothing else.
 - Verify claims the plan will treat as fact (use `learn-verify` when the domain is empirical, historical, or you are unsure). Math still gets a pass for named theorems if you would otherwise invent them.
-- Show the plan as a mermaid graph **before** teaching. Two jobs: the learner sees what is coming; the graph forces you to finish the reasoning.
-- Write the plan into `.alvar/sessions/<date>-<topic>.md`.
-- Ask if they want the graph changed. Then freeze it until a quiz failure forces a new node.
+- Show the plan as a mermaid graph **before** teaching, labelled with the node ids. Two jobs: the learner sees what is coming; the graph forces you to finish the reasoning.
+- Write the strands and the DAG into `.alvar/maps/<topic>.md` and the plan into `.alvar/sessions/<date>-<topic>.md`, per [map.md](map.md).
+- Ask if they want the graph changed. Then freeze it until a check forces a new node.
 
 ## Phase 3 — Teach
 
@@ -36,11 +38,12 @@ Walk the DAG. One node per turn.
 
 - One reasoning step. Stop. Do not rush the whole graph (that is the ChatGPT failure mode).
 - If a picture would lock the idea, use `learn-visual` (or write an SVG and look at it).
-- After the step, quiz that step. Three reasons: they cannot gaslight themselves; you stay calibrated; applying the idea is how it locks in.
-- Advance only on lock-in. Fail → stay, or insert a prerequisite node.
+- After the step, quiz that step, tagged with the node id. Three reasons: they cannot gaslight themselves; you stay calibrated; applying the idea is how it locks in.
+- Advance only on lock-in. The tagged check says where the lesson is; your judgement, not the score, decides when a node is finished. A failed check moves nothing: stay, or insert a prerequisite node.
+- Current and visited are read from the ledger, not stored as flags. Do not keep a done list.
 - Accept questions mid-step. Do not "finish the lesson" over them.
 - Give them things they can accept at face value only after the step they rest on is locked.
-- Persist what happened in the session file.
+- Persist every check as one ledger line in the session file, and every established proposition to `.alvar/graph.md` when the session ends.
 
 ## Feedback rules
 

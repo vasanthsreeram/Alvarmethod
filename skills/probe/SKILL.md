@@ -51,6 +51,10 @@ After each batch, update the map. Stop when the upcoming lesson's dependencies a
 
 ## Map file
 
+Ids, statuses and the ledger follow [../teach/references/map.md](../teach/references/map.md). Strands
+get ids `s1`, `s2`, … here and keep them for the life of the map; the teacher's plan nodes cite them
+under `grounds:`.
+
 ```markdown
 # Map — <goal>
 
@@ -58,14 +62,22 @@ Updated: <ISO date>
 Goal: <one sentence>
 
 ## Strands
-| strand | status | evidence |
-|--------|--------|----------|
-| … | known | Q2 + reason |
+| id | strand | status | evidence |
+|----|--------|--------|----------|
+| s1 | … | known | Q2 + said "rate of change" |
+| s2 | … | edge | Q4 correct, thin reason |
+
+## Assessment
+Read of the edge, in prose, three sentences at most: where this mind actually is, what the first
+lesson may assume, and what will break if it is assumed.
 
 ## Quiz log
-- Q1 [strand] <letter> — correct|wrong|idk — <five words>
+- Q1 [s1] <letter>, correct, "five words of their reason"
 ```
+
+The strand list is the handoff. A teacher reads it and nothing else from the probe.
 
 ## End
 
-Show the table. Say which strands a teacher should start from. Do not start the lesson unless they ask.
+Show the table, then the assessment. Say which strands a teacher should start from and which to
+assume. Do not start the lesson unless they ask.

@@ -5,8 +5,9 @@ All session state lives in the **learner's working directory**, not in this skil
 ```
 .alvar/
   LEARNER.md                 # how this mind wants to be taught
-  maps/<slug>.md             # probe results for one goal
-  sessions/<date>-<slug>.md  # plan + steps + quizzes
+  graph.md                   # propositions + reasoning chains, carried across sessions
+  maps/<slug>.md             # probe strands + the plan DAG for one goal
+  sessions/<date>-<slug>.md  # plan + steps + tagged checks + ledger
   visuals/<slug>-<n>.svg     # diagrams from learn-visual
 ```
 
@@ -25,6 +26,8 @@ Read LEARNER.md at the start of every `teach` session. It controls:
 
 ## Map file
 
+Full rules in [map.md](map.md). Shape:
+
 ```markdown
 # Map — <goal>
 
@@ -32,17 +35,26 @@ Updated: <ISO date>
 Goal: <one sentence>
 
 ## Strands
-| strand | status | evidence |
-|--------|--------|----------|
-| line integrals | known | Q2 correct, explained work |
-| Stokes | edge | recognized statement, missed Faraday link |
-| differential forms | unknown | said so |
-| SR field mix | blocked | answered "I don't know" |
+| id | strand | status | evidence |
+|----|--------|--------|----------|
+| s1 | line integrals | known | Q2 correct, explained work |
+| s2 | Stokes | edge | recognized statement, missed Faraday link |
+| s3 | differential forms | unknown | said so |
+| s4 | SR field mix | blocked | answered "I don't know" |
 
 Status: `known` | `edge` | `unknown` | `blocked`
 
+## Assessment
+Three sentences: where this mind is, what the first lesson may assume, what breaks if it does.
+
+## Plan
+| id | node | grounds | edges |
+|----|------|---------|-------|
+| n1 | covector as a machine | s1, s3 | n1 -> n2 |
+| n2 | 1-form | s2 | n2 -> n3 |
+
 ## Quiz log
-- Q1 [line integrals] C — correct
+- Q1 [s1] C, correct, "work done along the path"
 ```
 
 ## Session file
@@ -56,16 +68,23 @@ Goal:
 ## Plan
 \`\`\`mermaid
 graph TD
-  A[covector] --> B[1-form]
-  B --> C[wedge]
+  n1[covector as a machine] --> n2[1-form]
+  n2 --> n3[wedge]
 \`\`\`
 
+## Ledger
+- probe s2 wrong, foundation missing -> unknown
+- taught n1 (2 turns)
+- check n1 correct, "it eats a vector and returns a number"
+
 ## Log
-### Node: covector
+### Node: n1 covector as a machine
 - taught:
 - visual:
-- quiz:
-- result: lock-in | retry | insert-prereq
+- check: tagged n1
+- result: advance | retry | insert-prereq
 ```
+
+Current and visited are read from the ledger, never stored as flags.
 
 Keep these files updated as you go. They are the persistence layer (the portable stand-in for a markdown-log / Obsidian pane).

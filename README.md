@@ -110,8 +110,10 @@ flowchart LR
 ```
 
 1. **Probe** — graded MCQ in the harness picker, start wide, binary-search every strand
-2. **Plan** — mermaid DAG for *this* mind, shown *before* teaching
-3. **Teach** — one reasoning step, picture if needed, quiz, next node
+2. **Plan** — mermaid DAG for *this* mind, shown *before* teaching, with stable node ids
+3. **Teach** — one reasoning step, picture if needed, quiz tagged to that node, next node
+
+The map is what makes it repeatable: strands, the plan DAG with `s`/`n` ids, a ledger of tagged checks, and a graph of propositions that survives the session. Rules in [`skills/teach/references/map.md`](skills/teach/references/map.md).
 
 ---
 

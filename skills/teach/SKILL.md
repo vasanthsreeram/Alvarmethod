@@ -21,9 +21,11 @@ Read, in order, before the first question:
 
 1. [references/philosophy.md](references/philosophy.md)
 2. [references/process.md](references/process.md)
-3. [references/learner-files.md](references/learner-files.md)
-4. [references/quiz-ui.md](references/quiz-ui.md) — **required.** Quizzes use the harness question tool. Never A/B/C/D in chat.
-5. `.alvar/LEARNER.md` if it exists (else offer `learn-profile` or write a stub from [assets/LEARNER.md](assets/LEARNER.md) after 3–5 questions)
+3. [references/map.md](references/map.md) — **required.** Strands, the plan DAG, node ids, and the graph that survives the session.
+4. [references/learner-files.md](references/learner-files.md)
+5. [references/quiz-ui.md](references/quiz-ui.md) — **required.** Quizzes use the harness question tool. Never A/B/C/D in chat.
+6. `.alvar/LEARNER.md` if it exists (else offer `learn-profile` or write a stub from [assets/LEARNER.md](assets/LEARNER.md) after 3–5 questions)
+7. `.alvar/graph.md` if it exists — read it before probing, skip strands whose propositions are `held`, and say which you skipped.
 
 If `probe`, `learn-visual`, or `learn-verify` are installed, use them for those jobs. If not, follow the same protocols inline.
 
@@ -32,7 +34,9 @@ If `probe`, `learn-visual`, or `learn-verify` are installed, use them for those 
 - Struggle stays in the material. You absorb logistics.
 - Do not reteach `known`. Do not start in `unknown` with no ramp.
 - One reasoning step per turn. Stop. Quiz that step. Advance only on lock-in.
-- Show the mermaid plan **before** teaching. Do not skip the graph.
+- **Every check carries the node id it is about.** A check without a node id is a position the map cannot record, so the harness reports it back as an error and you retag.
+- **A tagged check is position, never completion.** Current is the node on the most recent tagged check. Visited is sticky. A failed check moves nothing.
+- Show the mermaid plan **before** teaching. Do not skip the graph. Node ids in the mermaid labels match the ids in the session file.
 - Never dump the whole explanation in one message.
 - Do not invent citations. Verify or mark uncertainty.
 - Trust is engineered: if a claim matters and you are not sure, verify before teaching it as fact.
@@ -40,21 +44,22 @@ If `probe`, `learn-visual`, or `learn-verify` are installed, use them for those 
 ## Turn 0
 
 1. Restate the goal in one sentence. Confirm.
-2. Load or create learner files.
+2. Load or create learner files, and read `.alvar/graph.md` if it exists.
 3. Probe (or reuse a map for this exact goal if it is fresh and the user agrees).
-4. Plan + mermaid. Pause.
-5. Teach node 1.
+4. Plan: assign strand ids `s1…` to what the probe read, node ids `n1…` to the steps, edges only prerequisite → dependent. Write the DAG into the map file before showing it.
+5. Plan + mermaid. Pause.
+6. Teach node 1.
 
 ## Quiz shape
 
 Call the harness quiz UI in [references/quiz-ui.md](references/quiz-ui.md). Do not paste letters in chat.
 
-Wait for the tool result. Score. Update the map and session file. Then either the next node, a retry, or an inserted prerequisite.
+Tag every teach check with its node id. Score it, then append one ledger line. Compute current and visited by reading the log, not by keeping flags. Then either the next node, a retry, or an inserted prerequisite.
 
 ## When they interrupt
 
-Answer the question. Do not "just finish the slide." Resume the same node unless the question reveals a missing prerequisite.
+Answer the question. Do not "just finish the slide." Resume the same node unless the question reveals a missing prerequisite, in which case insert a node.
 
 ## Done for now
 
-Write what locked, what is still `edge`, and the next node. Leave the session file in a state another agent can resume.
+Write the ledger, what locked, what is still `edge`, and the next node. Then append to `.alvar/graph.md` every proposition this session established, with its chain, its `source:` session and node id, and its status. Leave the session file in a state another agent can resume.
