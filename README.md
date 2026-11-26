@@ -14,6 +14,8 @@
   <a href="https://youtu.be/kzcI5F4tGiU"><img src="https://img.shields.io/badge/method-Eero%20Alvar-b45309?style=flat-square" alt="Eero Alvar" /></a>
 </p>
 
+<p align="center"><a href="https://mindpal.space/skills/alvar-method-tutor?utm_source=github&utm_medium=readme_button"><img src="https://mindpal.space/badges/deploy-on-mindpal.svg" alt="Deploy on MindPal" height="36"></a></p>
+
 ```bash
 npx skills add vasanthsreeram/Alvarmethod -g --all
 ```
